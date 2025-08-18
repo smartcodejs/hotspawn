@@ -1,0 +1,28 @@
+config { type: "view", tags: ["ga4","staging"] }
+
+SELECT
+  user_pseudo_id,
+  TIMESTAMP_MICROS(event_timestamp) AS event_ts,
+  DATE(TIMESTAMP_MICROS(event_timestamp), 'Europe/Bratislava') AS event_date,
+  event_name,
+  (SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key='ga_session_id') AS ga_session_id,
+  CONCAT(
+    CAST(user_pseudo_id AS STRING), '-',
+    CAST((SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key='ga_session_id') AS STRING)
+  ) AS session_key,
+  user_id AS event_user_id,
+  (SELECT up.value.string_value FROM UNNEST(user_properties) up WHERE up.key='user_id') AS userprop_user_id,
+  traffic_source.source  AS ts_source,
+  traffic_source.medium  AS ts_medium,
+  traffic_source.name    AS ts_campaign,
+  geo.country AS geo_country,
+  device.category AS device_category,
+  device.operating_system AS device_operating_system,
+  device.mobile_brand_name,
+  device.mobile_model_name,
+  platform,
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key='site_name') AS site_name
+FROM `hotspawn-440312.analytics_457395054.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101'
+  AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('Europe/Bratislava'))
+  AND user_pseudo_id IS NOT NULL
