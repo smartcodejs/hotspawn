@@ -1,4 +1,4 @@
 warehouse: bigquery
 defaultDatabase: hotspawn-440312
-defaultSchema: dataform_staging
+defaultSchema: dataform_assertions
 assertionSchema: dataform_assertions
