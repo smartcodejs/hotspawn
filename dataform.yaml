@@ -1,4 +1,8 @@
 warehouse: bigquery
 defaultDatabase: hotspawn-440312
-defaultSchema: dataform_assertions
-assertionSchema: dataform_assertions
+defaultSchema: core_default                # we'll override per model
+assertionSchema: ga4_dq
+vars:
+  timezone: "Europe/Bratislava"
+  backfill_days: "7"                       # window to recompute on incremental runs
+
