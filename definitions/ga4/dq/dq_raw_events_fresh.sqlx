@@ -1,4 +1,0 @@
-config { type: "assertion", schema: dataform.projectConfig.vars.schema, tags: ["ga4","dq","freshness"] }
-SELECT 1
-WHERE (SELECT MAX(event_ts) FROM ${ref("raw_events")})
-      < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)

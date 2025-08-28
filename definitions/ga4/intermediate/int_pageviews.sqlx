@@ -1,0 +1,85 @@
+config {
+  type: "table",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4","intermediate","pageview"],
+  bigquery: { partitionBy: "session_date", clusterBy: ["session_id"] }
+}
+
+WITH page_views AS (
+  SELECT
+    event_date AS session_date,
+    user_pseudo_id,
+    CONCAT(CAST(user_pseudo_id AS STRING), "-", CAST(ga_session_id AS STRING)) AS session_id,
+    event_ts AS pageview_time,
+    page_location AS page_url,
+    page_title,
+    COALESCE(NULLIF(SPLIT(REGEXP_EXTRACT(page_location, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(0)], ''), 'hotspawn') AS theme_category,
+    COALESCE(NULLIF(SPLIT(REGEXP_EXTRACT(page_location, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(1)], ''), 'hotspawn') AS page_category
+  FROM ${ref("raw_page_source")}
+  WHERE event_name = 'page_view' AND ga_session_id IS NOT NULL
+),
+
+article_data AS (
+  SELECT user_pseudo_id, page_location AS page_url,
+         COALESCE(NULLIF(author_name, ''), 'hotspawn') AS author_name
+  FROM ${ref("raw_page_source")}
+  WHERE event_name = 'article_view'
+),
+
+scr_data AS (
+  SELECT
+    CONCAT(CAST(user_pseudo_id AS STRING), "-", CAST(ga_session_id AS STRING)) AS session_id,
+    page_location AS page_url,
+    MAX(scroll_percentage) AS max_scroll_percentage
+  FROM ${ref("raw_page_source")}
+  WHERE event_name = 'scroll_depth'
+  GROUP BY session_id, page_url
+),
+
+time_spent_data AS (
+  SELECT
+    CONCAT(CAST(user_pseudo_id AS STRING), "-", CAST(ga_session_id AS STRING)) AS session_id,
+    page_location AS page_url,
+    MAX(SAFE_CAST(REGEXP_EXTRACT(time_spent_str, r'^(\d+)') AS INT64)) AS max_time_on_page
+  FROM ${ref("raw_page_source")}
+  WHERE event_name = 'time_on_page'
+  GROUP BY session_id, page_url
+),
+
+user_type_data AS (
+  SELECT
+    user_pseudo_id,
+    CASE WHEN MAX(CASE WHEN event_name = 'first_visit' THEN 1 ELSE 0 END) > 0
+         THEN 'New User' ELSE 'Returning User' END AS user_type
+  FROM ${ref("raw_page_source")}
+  GROUP BY user_pseudo_id
+)
+
+SELECT
+  pv.session_date,
+  pv.user_pseudo_id,
+  pv.session_id,
+  pv.page_url,
+  pv.page_title,
+  COALESCE(MAX(pv.theme_category), 'hotspawn') AS theme_category,
+  COALESCE(MAX(pv.page_category), 'hotspawn') AS page_category,
+  COALESCE(MAX(ad.author_name), 'hotspawn') AS author_name,
+  COALESCE(MAX(scr.max_scroll_percentage), 10) AS max_scroll_percentage,
+  COALESCE(MAX(ts.max_time_on_page), 15) AS max_time_on_page,
+  ROW_NUMBER() OVER (PARTITION BY pv.session_id ORDER BY pv.pageview_time) AS pageview_number,
+  LEAD(pv.page_url) OVER (PARTITION BY pv.session_id ORDER BY pv.pageview_time) AS next_page_url,
+  MAX(ut.user_type) AS user_type,
+  CASE WHEN ROW_NUMBER() OVER (PARTITION BY pv.session_id ORDER BY pv.pageview_time) = 1 THEN 1 ELSE 0 END AS isLandingPage,
+  CASE WHEN ROW_NUMBER() OVER (PARTITION BY pv.session_id ORDER BY pv.pageview_time DESC) = 1 THEN 1 ELSE 0 END AS isExitPage,
+  LAST_VALUE(pv.page_url) OVER (
+    PARTITION BY pv.session_id
+    ORDER BY pv.pageview_time ASC
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  ) AS exit_page_url
+FROM page_views pv
+LEFT JOIN article_data    ad  ON pv.page_url = ad.page_url  AND pv.user_pseudo_id = ad.user_pseudo_id
+LEFT JOIN scr_data        scr ON pv.session_id = scr.session_id AND pv.page_url = scr.page_url
+LEFT JOIN time_spent_data ts  ON pv.session_id = ts.session_id  AND pv.page_url = ts.page_url
+LEFT JOIN user_type_data  ut  ON pv.user_pseudo_id = ut.user_pseudo_id
+GROUP BY
+  pv.session_date, pv.user_pseudo_id, pv.session_id, pv.page_url, pv.page_title, pv.pageview_time

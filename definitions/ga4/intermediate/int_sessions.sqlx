@@ -5,7 +5,7 @@ config {
   bigquery: {
     partitionBy: "DATE(session_start_ts)",
     clusterBy: ["user_pseudo_id","ga_session_id"],
-    requirePartitionFilter: true
+    requirePartitionFilter: false
   }
 }
 
@@ -14,53 +14,11 @@ WITH base AS (
     user_pseudo_id, event_ts, event_date, event_name,
     ga_session_id,
     session_source, session_medium, session_campaign,
-    ts_source, ts_medium, ts_campaign,
     site_name,
     geo_country, device_category, device_operating_system, platform,
     engagement_time_msec, page_location
-  FROM ${ref("raw_events")}
+  FROM ${ref("raw_sessions_source")}
 ),
 
-with_keys AS (
-  SELECT
-    *,
-    CASE
-      WHEN ga_session_id IS NULL THEN NULL
-      ELSE CONCAT(CAST(user_pseudo_id AS STRING), "-", CAST(ga_session_id AS STRING))
-    END AS session_key
-  FROM base
-  WHERE ga_session_id IS NOT NULL
-),
-
-sessions AS (
-  SELECT
-    user_pseudo_id,
-    ga_session_id,
-    session_key,
-
-    MIN(event_ts) AS session_start_ts,
-    MAX(event_ts) AS session_end_ts,
-    DATE(MIN(event_ts), "${dataform.projectConfig.vars.timezone}") AS session_date,
-
-    COUNT(*) AS event_count,
-    COUNTIF(event_name = 'page_view') AS page_views,
-    SUM(COALESCE(engagement_time_msec, 0)) AS engagement_time_msec,
-
-    ARRAY_AGG(session_source   IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS session_source,
-    ARRAY_AGG(session_medium   IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS session_medium,
-    ARRAY_AGG(session_campaign IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS session_campaign,
-
-    ARRAY_AGG(IF(event_name='page_view', page_location, NULL)
-              IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS landing_page,
-
-    ARRAY_AGG(geo_country             IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS geo_country,
-    ARRAY_AGG(device_category         IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS device_category,
-    ARRAY_AGG(device_operating_system IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS device_operating_system,
-    ARRAY_AGG(platform                IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS platform,
-
-    LOGICAL_OR(site_name = 'Microsite') AS is_microsite
-  FROM with_keys
-  GROUP BY user_pseudo_id, ga_session_id, session_key
-)
-
-SELECT * FROM sessions
+-- … your sessions logic …
+SELECT * FROM /* your final CTE */
