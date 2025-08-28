@@ -1,2 +1,28 @@
-config { type: "view", schema: dataform.projectConfig.vars.schema, tags: ["ga4","mart","pageview"] }
-SELECT * FROM ${ref("int_pageviews")}
+config {
+  type: "table",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4","mart","pageviews"],
+  bigquery: {
+    partitionBy: "session_date",
+    clusterBy: ["session_id","user_pseudo_id"]
+  }
+}
+
+SELECT
+  session_date,
+  user_pseudo_id,
+  session_id,
+  page_url,
+  page_title,
+  theme_category,
+  page_category,
+  author_name,
+  max_scroll_percentage,
+  max_time_on_page,
+  pageview_number,
+  next_page_url,
+  user_type,
+  isLandingPage,
+  isExitPage,
+  exit_page_url
+FROM ${ref("int_pageviews")}

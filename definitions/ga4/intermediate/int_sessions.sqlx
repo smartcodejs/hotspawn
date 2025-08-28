@@ -8,24 +8,89 @@ config {
   }
 }
 
-WITH src AS (
-  -- IMPORTANT: rely on the raw object via ref(), no backticks around ref()
+/* Base: rely on raw_users_source (already a tidy projection of events_*) */
+WITH base AS (
   SELECT
     user_pseudo_id,
-    ga_session_id,
-    event_ts,
-    event_date
-  FROM ${ref("raw_sessions_source")}
+    TIMESTAMP(event_ts)         AS event_ts,        -- raw view provides event_ts (TIMESTAMP or STRING -> TIMESTAMP)
+    CAST(event_date AS DATE)    AS event_date,      -- DATE
+    event_name,
+    ga_session_id,                                   -- INT
+    -- UTM (usually set on session_start)
+    session_source, session_medium, session_campaign,
+    -- geo/device/platform
+    geo_country, device_category, platform,
+    -- optional site flag
+    site_name
+  FROM ${ref("raw_users_source")}
+  WHERE ga_session_id IS NOT NULL
 ),
 
-session_starts AS (
+/* Session key + per-session aggregates */
+per_session AS (
   SELECT
     user_pseudo_id,
     ga_session_id,
+    CONCAT(CAST(user_pseudo_id AS STRING), "-", CAST(ga_session_id AS STRING)) AS session_id,
+
+    -- timing
     MIN(event_ts)   AS session_start_ts,
-    MIN(event_date) AS session_start_date
-  FROM src
-  GROUP BY 1,2
+    MIN(event_date) AS session_start_date,
+
+    -- first non-null snapshot within the session
+    ARRAY_AGG(site_name       IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)]       AS site_name,
+    ARRAY_AGG(geo_country     IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)]       AS country,
+    ARRAY_AGG(device_category IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)]       AS device,
+    ARRAY_AGG(platform        IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)]       AS platform,
+
+    -- session UTM as captured on (first) session_start
+    ARRAY_AGG(session_source  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)]       AS session_source,
+    ARRAY_AGG(session_medium  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)]       AS session_medium,
+    ARRAY_AGG(session_campaign IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)]      AS session_campaign,
+
+    -- counts
+    COUNTIF(event_name = 'page_view')                                                   AS page_view,
+    COUNTIF(event_name = 'user_engagement')                                             AS engaged_events,
+    COUNTIF(event_name IN ('sign_up','user_signup'))                                    AS user_signup_events,
+
+    -- new vs returning (detect first_visit inside the session)
+    MAX(CASE WHEN event_name = 'first_visit' THEN 1 ELSE 0 END)                         AS has_first_visit
+  FROM base
+  GROUP BY user_pseudo_id, ga_session_id
+),
+
+final AS (
+  SELECT
+    -- required columns / types to match your screenshot
+    CAST(session_start_date AS DATE)                              AS date,
+    site_name                                                     AS site_name,
+    TIME(session_start_ts)                                        AS session_time,      -- TIME
+    CAST(user_pseudo_id AS STRING)                                AS pseud_id,
+    session_id,                                                                          -- STRING
+    country, device, platform,
+
+    CASE WHEN has_first_visit = 1 THEN 'New User' ELSE 'Returning User' END AS user_type,
+
+    /* Channel grouping from session_source/medium */
+    CASE
+      WHEN LOWER(session_medium) = 'organic'                          THEN 'Organic Search'
+      WHEN LOWER(session_medium) IN ('cpc','ppc','paid','paid_search') THEN 'Paid Search'
+      WHEN LOWER(session_medium) = 'referral'                          THEN 'Referral'
+      WHEN LOWER(session_source) IN ('(direct)','direct')              THEN 'Direct'
+      WHEN LOWER(session_medium) IN ('social','paid_social') OR
+           LOWER(session_source) IN ('facebook','instagram','tiktok','twitter','x','linkedin','youtube','pinterest')
+                                                                       THEN 'Social'
+      ELSE 'Other'
+    END AS channel_grouping,
+
+    session_source, session_medium, session_campaign,
+
+    -- ints in the mart
+    CAST(engaged_events > 0 AS INT64)                                 AS engaged_session,
+    CAST(page_view = 1 AND engaged_events = 0 AS INT64)               AS bounces,
+    page_view                                                         AS page_view,
+    user_signup_events                                                AS user_signup
+  FROM per_session
 )
 
-SELECT * FROM session_starts
+SELECT * FROM final
