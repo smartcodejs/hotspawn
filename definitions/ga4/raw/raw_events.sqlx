@@ -39,6 +39,6 @@ SELECT
   event_name
 FROM `hotspawn-440312.analytics_457395054.events_*`
 WHERE
-  _TABLE_SUFFIX BETWEEN '${dataform.projectConfig.vars.raw_start_date}'
-  AND FORMAT_DATE('%Y%m%d', CURRENT_DATE("${dataform.projectConfig.vars.timezone}"))
+  _TABLE_SUFFIX BETWEEN '20240101'
+  AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('Europe/Bratislava'))
   AND user_pseudo_id IS NOT NULL
