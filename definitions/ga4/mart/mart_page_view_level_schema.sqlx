@@ -4,7 +4,7 @@ config {
   tags: ["ga4","mart","pageviews"],
   bigquery: {
     partitionBy: "session_date",
-    clusterBy: ["session_id","user_pseudo_id"]
+    clusterBy: ["user_pseudo_id","session_id"]
   }
 }
 

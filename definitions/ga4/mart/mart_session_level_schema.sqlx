@@ -4,7 +4,7 @@ config {
   tags: ["ga4","mart","sessions"],
   bigquery: {
     partitionBy: "date",
-    clusterBy: ["session_id","pseud_id"]
+    clusterBy: ["site_name","pseud_id","session_id"]
   }
 }
 
@@ -22,8 +22,8 @@ SELECT
   session_source,
   session_medium,
   session_campaign,
-  engaged_session,
   bounces,
   page_view,
-  user_signup
+  user_signup,
+  engaged_session
 FROM ${ref("int_sessions")}

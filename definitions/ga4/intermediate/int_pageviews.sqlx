@@ -3,142 +3,105 @@ config {
   schema: dataform.projectConfig.vars.schema,
   tags: ["ga4","intermediate","pageviews"],
   bigquery: {
-    partitionBy: "session_date",
-    clusterBy: ["session_id","user_pseudo_id"]
+    partitionBy: "DATE(event_ts)",
+    clusterBy: ["user_pseudo_id","ga_session_id"]
   }
 }
 
-/* Work only from the prepared raw_page_source (it contains all GA4 events) */
-WITH src AS (
+/* Use ONLY columns that exist in raw_page_source */
+WITH base AS (
   SELECT
     user_pseudo_id,
-    TIMESTAMP(event_ts)      AS event_ts,
-    CAST(event_date AS DATE) AS event_date,
-    event_name,
     ga_session_id,
-
-    -- helpful params (string/int) already unpacked in raw view
-    page_location,           -- url
+    event_ts,
+    event_date,
+    page_url,
     page_title,
-    author_name,             -- if present on article_view
-    scroll_percentage,       -- if present on scroll_depth
-    time_spent               -- if present on time_on_page (string like "123s")
+    author_name,            -- may be NULL on non-article events
+    scroll_pct,             -- INT, only present on scroll events
+    time_spent_sec,         -- INT, only present on time_on_page events
+    event_name
   FROM ${ref("raw_page_source")}
 ),
 
-/* Page view rows only */
+/* Keep only real page views (ordering anchor for RN/LEAD) */
 pv AS (
-  SELECT
-    event_date                                                  AS session_date,
-    user_pseudo_id,
-    CONCAT(CAST(user_pseudo_id AS STRING), "-", CAST(ga_session_id AS STRING)) AS session_id,
-    event_ts                                                    AS pageview_time,
-    page_location                                               AS page_url,
-    page_title
-  FROM src
-  WHERE event_name = 'page_view' AND ga_session_id IS NOT NULL
+  SELECT *
+  FROM base
+  WHERE event_name = 'page_view'
 ),
 
-/* Best-effort theme/page categories from url path */
-pv_enriched AS (
+/* Aggregate per (session_id, page_url) */
+scroll AS (
   SELECT
-    p.*,
-
-    -- theme_category = path segment [1], page_category = path segment [2]
-    COALESCE(
-      NULLIF(SPLIT(REGEXP_EXTRACT(p.page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(0)], ''), 'hotspawn'
-    ) AS theme_category,
-    COALESCE(
-      NULLIF(SPLIT(REGEXP_EXTRACT(p.page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(1)], ''), 'hotspawn'
-    ) AS page_category
-  FROM pv p
+    CONCAT(user_pseudo_id, "-", CAST(ga_session_id AS STRING)) AS session_id,
+    page_url,
+    MAX(scroll_pct) AS max_scroll_percentage
+  FROM base
+  WHERE scroll_pct IS NOT NULL
+  GROUP BY 1,2
+),
+time_on_page AS (
+  SELECT
+    CONCAT(user_pseudo_id, "-", CAST(ga_session_id AS STRING)) AS session_id,
+    page_url,
+    MAX(time_spent_sec) AS max_time_on_page
+  FROM base
+  WHERE time_spent_sec IS NOT NULL
+  GROUP BY 1,2
 ),
 
-/* Article author (from article_view) */
-article AS (
+/* One author per (session,page). If you only store author at article_view rows,
+   this will still safely return NULL when absent. */
+authors AS (
   SELECT
-    user_pseudo_id,
-    page_location AS page_url,
-    COALESCE(NULLIF(author_name, ''), 'hotspawn') AS author_name
-  FROM src
-  WHERE event_name = 'article_view'
-),
-
-/* Scroll depth (max per session+url) */
-scr AS (
-  SELECT
-    CONCAT(CAST(user_pseudo_id AS STRING), "-", CAST(ga_session_id AS STRING)) AS session_id,
-    page_location AS page_url,
-    MAX(scroll_percentage) AS max_scroll_percentage
-  FROM src
-  WHERE event_name = 'scroll_depth'
-  GROUP BY session_id, page_url
-),
-
-/* Time on page (max per session+url) */
-time_on AS (
-  SELECT
-    CONCAT(CAST(user_pseudo_id AS STRING), "-", CAST(ga_session_id AS STRING)) AS session_id,
-    page_location AS page_url,
-    MAX(SAFE_CAST(REGEXP_EXTRACT(time_spent, r'^(\d+)') AS INT64)) AS max_time_on_page
-  FROM src
-  WHERE event_name = 'time_on_page'
-  GROUP BY session_id, page_url
-),
-
-/* User type (new vs returning) at user scope */
-user_type AS (
-  SELECT
-    user_pseudo_id,
-    CASE WHEN MAX(CASE WHEN event_name = 'first_visit' THEN 1 ELSE 0 END) > 0
-         THEN 'New User' ELSE 'Returning User' END AS user_type
-  FROM src
-  GROUP BY user_pseudo_id
-),
-
-numbered AS (
-  SELECT
-    p.session_date,
-    p.user_pseudo_id,
-    p.session_id,
-    p.page_url,
-    p.page_title,
-    p.theme_category,
-    p.page_category,
-    a.author_name,
-    s.max_scroll_percentage,
-    t.max_time_on_page,
-    ROW_NUMBER() OVER (PARTITION BY p.session_id ORDER BY p.pageview_time) AS pageview_number,
-    LEAD(p.page_url) OVER (PARTITION BY p.session_id ORDER BY p.pageview_time) AS next_page_url,
-    u.user_type,
-    p.pageview_time
-  FROM pv_enriched p
-  LEFT JOIN article  a ON p.user_pseudo_id = a.user_pseudo_id AND p.page_url = a.page_url
-  LEFT JOIN scr      s ON p.session_id = s.session_id AND p.page_url = s.page_url
-  LEFT JOIN time_on  t ON p.session_id = t.session_id AND p.page_url = t.page_url
-  LEFT JOIN user_type u ON p.user_pseudo_id = u.user_pseudo_id
+    CONCAT(user_pseudo_id, "-", CAST(ga_session_id AS STRING)) AS session_id,
+    page_url,
+    ANY_VALUE(author_name IGNORE NULLS) AS author_name
+  FROM base
+  WHERE author_name IS NOT NULL
+  GROUP BY 1,2
 )
 
 SELECT
-  session_date,
-  user_pseudo_id,
-  session_id,
-  page_url,
-  page_title,
-  COALESCE(theme_category, 'hotspawn')                              AS theme_category,
-  COALESCE(page_category,  'hotspawn')                              AS page_category,
-  COALESCE(author_name,    'hotspawn')                              AS author_name,
-  COALESCE(max_scroll_percentage, 10)                               AS max_scroll_percentage,
-  COALESCE(max_time_on_page,    15)                                 AS max_time_on_page,
-  pageview_number,
-  next_page_url,
-  user_type,
-  CASE WHEN pageview_number = 1 THEN 1 ELSE 0 END                   AS isLandingPage,
-  CASE WHEN pageview_number = MAX(pageview_number)
-       OVER (PARTITION BY session_id) THEN 1 ELSE 0 END             AS isExitPage,
-  LAST_VALUE(page_url) OVER (
-    PARTITION BY session_id
-    ORDER BY pageview_time
+  DATE(pv.event_ts) AS session_date,
+  pv.user_pseudo_id,
+  CONCAT(pv.user_pseudo_id, "-", CAST(pv.ga_session_id AS STRING)) AS session_id,
+  pv.page_url,
+  pv.page_title,
+
+  /* theme/page categories parsed from URL path (robust defaults) */
+  COALESCE(
+    NULLIF(SPLIT(REGEXP_EXTRACT(pv.page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(0)], ''),
+    'hotspawn'
+  ) AS theme_category,
+  COALESCE(
+    NULLIF(SPLIT(REGEXP_EXTRACT(pv.page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(1)], ''),
+    'hotspawn'
+  ) AS page_category,
+
+  COALESCE(a.author_name, 'hotspawn')                               AS author_name,
+  COALESCE(s.max_scroll_percentage, 10)                             AS max_scroll_percentage,
+  COALESCE(t.max_time_on_page, 15)                                  AS max_time_on_page,
+
+  ROW_NUMBER() OVER (PARTITION BY pv.user_pseudo_id, pv.ga_session_id ORDER BY pv.event_ts) AS pageview_number,
+  LEAD(pv.page_url) OVER (PARTITION BY pv.user_pseudo_id, pv.ga_session_id ORDER BY pv.event_ts) AS next_page_url,
+
+  /* User type from the users model */
+  u.user_type,
+
+  CASE WHEN ROW_NUMBER() OVER (PARTITION BY pv.user_pseudo_id, pv.ga_session_id ORDER BY pv.event_ts) = 1 THEN 1 ELSE 0 END AS isLandingPage,
+  CASE WHEN ROW_NUMBER() OVER (PARTITION BY pv.user_pseudo_id, pv.ga_session_id ORDER BY pv.event_ts DESC) = 1 THEN 1 ELSE 0 END AS isExitPage,
+
+  LAST_VALUE(pv.page_url) OVER (
+    PARTITION BY pv.user_pseudo_id, pv.ga_session_id
+    ORDER BY pv.event_ts
     ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
   ) AS exit_page_url
-FROM numbered
+
+FROM pv
+LEFT JOIN scroll        s ON s.session_id = CONCAT(pv.user_pseudo_id, "-", CAST(pv.ga_session_id AS STRING))
+                         AND s.page_url   = pv.page_url
+LEFT JOIN time_on_page  t ON t.session_id = CONCAT(pv.user_pseudo_id, "-", CAST(pv.ga_session_id AS STRING))
+                         AND t.page_url   = pv.page_url
+LEFT JOIN ${ref("int_users")} u USING (user_pseudo_id)
