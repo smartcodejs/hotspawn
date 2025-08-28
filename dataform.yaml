@@ -1,10 +1,11 @@
 warehouse: bigquery
 defaultDatabase: hotspawn-440312
-defaultSchema: ga4_production
+defaultSchema: dataform        # just a default; we override via vars
+defaultLocation: EU            # IMPORTANT to avoid EU/US errors
 vars:
-  schema: "ga4_production"        # staging release overrides to ga4_staging
-  timezone: "Europe/Bratislava"
-  backfill_days: "7"
+  schema: ga4_staging          # overridden per release
+  timezone: Europe/Bratislava
+  backfill_days: 3
 
 
 
