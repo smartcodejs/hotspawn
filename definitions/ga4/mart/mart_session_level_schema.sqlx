@@ -1,0 +1,2 @@
+config { type: "view", schema: dataform.projectConfig.vars.schema, tags: ["ga4","mart","sessions"] }
+SELECT * FROM ${ref("int_sessions")}
