@@ -8,13 +8,16 @@ config {
 with base as (
   select
     user_pseudo_id,
-    event_ts,                     -- TIMESTAMP (exists in raw_users_source)
-    event_date,                   -- DATE (exists in raw_users_source)
+    event_ts,                    -- TIMESTAMP
+    event_date,                  -- DATE
     event_name,
     ga_session_id,
-    session_source,
-    session_medium,
-    session_campaign,
+
+    -- traffic_source.* exposed by raw_users_source
+    ts_source,
+    ts_medium,
+    ts_campaign,
+
     site_name,
     geo_country,
     device_category,
@@ -22,6 +25,7 @@ with base as (
     mobile_brand_name,
     mobile_model_name,
     platform,
+
     event_user_id,
     userprop_user_id
   from ${ref("raw_users_source")}
@@ -31,8 +35,10 @@ with base as (
 sessions as (
   select
     user_pseudo_id,
-    if(ga_session_id is null, null,
-       concat(cast(user_pseudo_id as string), "-", cast(ga_session_id as string))) as session_key,
+    if(
+      ga_session_id is null, null,
+      concat(cast(user_pseudo_id as string), "-", cast(ga_session_id as string))
+    ) as session_key,
     site_name,
     event_name,
     event_ts,
@@ -66,13 +72,13 @@ first_device_geo as (
   group by user_pseudo_id
 ),
 
--- 4) FIRST-touch UTM (from session_* columns you extracted)
+-- 4) FIRST-touch UTM from traffic_source.*
 first_from_ts as (
   select
     user_pseudo_id,
-    array_agg(session_source  ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_source,
-    array_agg(session_medium  ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_medium,
-    array_agg(session_campaign ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_campaign
+    array_agg(ts_source   ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_source,
+    array_agg(ts_medium   ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_medium,
+    array_agg(ts_campaign ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_campaign
   from base
   group by user_pseudo_id
 ),
@@ -83,11 +89,13 @@ user_rollup as (
     user_pseudo_id,
     min(event_date) as first_seen,
     min(event_ts)   as first_seen_ts,
-    count(distinct session_key)                                           as sessions_by_key,
-    count(distinct if(site_name = 'Microsite', session_key, null))        as microsite_sessions,
-    array_agg(if(event_name in ('sign_up','user_signup'), event_ts, null)
-              ignore nulls order by event_ts asc)[safe_offset(0)]         as signup_timestamp,
-    count(*)                                                              as event_rows
+    count(distinct session_key)                                        as sessions_by_key,
+    count(distinct if(site_name = 'Microsite', session_key, null))     as microsite_sessions,
+    array_agg(
+      if(event_name in ('sign_up','user_signup'), event_ts, null)
+      ignore nulls order by event_ts asc
+    )[safe_offset(0)]                                                  as signup_timestamp,
+    count(*)                                                           as event_rows
   from sessions
   group by user_pseudo_id
 )
@@ -98,14 +106,18 @@ select
   uid.user_id,
   r.first_seen,
   case when r.sessions_by_key > 0 then r.sessions_by_key
-       when r.event_rows      > 0 then 1 else 0 end                       as total_sessions,
-  if(r.signup_timestamp is null, 0, 1)                                     as signup_occurred,
+       when r.event_rows      > 0 then 1
+       else 0 end                                                    as total_sessions,
+  if(r.signup_timestamp is null, 0, 1)                               as signup_occurred,
   r.signup_timestamp,
-  date(r.signup_timestamp)                                                 as signup_date,
+  date(r.signup_timestamp)                                           as signup_date,
+
   fts.first_utm_source,
   fts.first_utm_medium,
   fts.first_utm_campaign,
+
   r.microsite_sessions,
+
   fdg.first_geo_country,
   fdg.first_device_category,
   fdg.first_device_operating_system,
