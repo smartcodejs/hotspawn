@@ -1,122 +1,118 @@
 config {
   type: "table",
   schema: dataform.projectConfig.vars.schema,
-  tags: ["ga4","intermediate","users"],
-  bigquery: {
-    partitionBy: "first_seen",
-    clusterBy: ["user_pseudo_id"]
-  }
+  tags: ["ga4", "intermediate", "users"]
 }
 
-/* ---------- 1) Source (raw) via ref() ---------- */
-WITH base AS (
-  SELECT
+-- 0) Base from the prepared raw view (already has event_ts and event_date)
+with base as (
+  select
     user_pseudo_id,
-    TIMESTAMP_MICROS(event_timestamp)                        AS event_ts,
-    DATE(TIMESTAMP_MICROS(event_timestamp))                  AS event_date,
+    event_ts,                     -- TIMESTAMP (exists in raw_users_source)
+    event_date,                   -- DATE (exists in raw_users_source)
     event_name,
-
-    -- GA4 session id
-    (SELECT ep.value.int_value
-       FROM UNNEST(event_params) ep
-      WHERE ep.key = 'ga_session_id')                        AS ga_session_id,
-
-    -- optional session UTM (only used for first_from_session fallback, here we only store them)
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'source')   AS session_source,
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'medium')   AS session_medium,
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'campaign') AS session_campaign,
-
-    -- traffic_source.* (first touch)
-    traffic_source.source   AS ts_source,
-    traffic_source.medium   AS ts_medium,
-    traffic_source.name     AS ts_campaign,
-
-    -- optional site marker
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'site_name') AS site_name,
-
-    -- device/geo snapshot per event
-    geo.country                 AS geo_country,
-    device.category             AS device_category,
-    device.operating_system     AS device_operating_system,
-    device.mobile_brand_name    AS mobile_brand_name,
-    device.mobile_model_name    AS mobile_model_name,
-    platform
-  FROM ${ref("raw_users_source")}
+    ga_session_id,
+    session_source,
+    session_medium,
+    session_campaign,
+    site_name,
+    geo_country,
+    device_category,
+    device_operating_system,
+    mobile_brand_name,
+    mobile_model_name,
+    platform,
+    event_user_id,
+    userprop_user_id
+  from ${ref("raw_users_source")}
 ),
 
-/* ---------- 2) First device/geo snapshot ---------- */
-first_device_geo AS (
-  SELECT
+-- 1) Canonical session key for counting sessions
+sessions as (
+  select
     user_pseudo_id,
-    ARRAY_AGG(device_category         IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_device_category,
-    ARRAY_AGG(device_operating_system IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_device_operating_system,
-    ARRAY_AGG(mobile_brand_name       IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_mobile_brand_name,
-    ARRAY_AGG(mobile_model_name       IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_mobile_model_name,
-    ARRAY_AGG(platform                IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_platform,
-    ARRAY_AGG(geo_country             IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_geo_country
-  FROM base
-  GROUP BY 1
+    if(ga_session_id is null, null,
+       concat(cast(user_pseudo_id as string), "-", cast(ga_session_id as string))) as session_key,
+    site_name,
+    event_name,
+    event_ts,
+    event_date
+  from base
 ),
 
-/* ---------- 3) First touch attribution (traffic_source.* only) ---------- */
-first_from_ts AS (
-  SELECT
+-- 2) Latest stitched user_id (from top-level or user_property)
+user_id_latest as (
+  select
     user_pseudo_id,
-    ARRAY_AGG(ts_source   IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_ts_source,
-    ARRAY_AGG(ts_medium   IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_ts_medium,
-    ARRAY_AGG(ts_campaign IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_ts_campaign
-  FROM base
-  GROUP BY 1
+    coalesce(
+      array_agg(event_user_id    ignore nulls order by event_ts desc)[safe_offset(0)],
+      array_agg(userprop_user_id ignore nulls order by event_ts desc)[safe_offset(0)]
+    ) as user_id
+  from base
+  group by user_pseudo_id
 ),
 
-/* ---------- 4) User rollup ---------- */
-user_rollup AS (
-  SELECT
+-- 3) FIRST device / geo / platform snapshot
+first_device_geo as (
+  select
     user_pseudo_id,
-    MIN(event_date) AS first_seen,
+    array_agg(device_category         ignore nulls order by event_ts asc)[safe_offset(0)] as first_device_category,
+    array_agg(device_operating_system ignore nulls order by event_ts asc)[safe_offset(0)] as first_device_operating_system,
+    array_agg(mobile_brand_name       ignore nulls order by event_ts asc)[safe_offset(0)] as first_mobile_brand_name,
+    array_agg(mobile_model_name       ignore nulls order by event_ts asc)[safe_offset(0)] as first_mobile_model_name,
+    array_agg(platform                ignore nulls order by event_ts asc)[safe_offset(0)] as first_platform,
+    array_agg(geo_country             ignore nulls order by event_ts asc)[safe_offset(0)] as first_geo_country
+  from base
+  group by user_pseudo_id
+),
 
-    -- sessions by key (ga_session_id present) with a fallback of 1 if none are present
-    COUNT(DISTINCT IF(event_name = 'session_start' AND ga_session_id IS NOT NULL,
-                      CONCAT(CAST(user_pseudo_id AS STRING), '-', CAST(ga_session_id AS STRING)),
-                      NULL)) AS sessions_by_key,
+-- 4) FIRST-touch UTM (from session_* columns you extracted)
+first_from_ts as (
+  select
+    user_pseudo_id,
+    array_agg(session_source  ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_source,
+    array_agg(session_medium  ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_medium,
+    array_agg(session_campaign ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_campaign
+  from base
+  group by user_pseudo_id
+),
 
-    COUNT(DISTINCT IF(event_name = 'session_start' AND site_name = 'Microsite'
-                      AND ga_session_id IS NOT NULL,
-                      CONCAT(CAST(user_pseudo_id AS STRING), '-', CAST(ga_session_id AS STRING)),
-                      NULL)) AS microsite_sessions,
-
-    ARRAY_AGG(IF(event_name IN ('sign_up','user_signup'), event_ts, NULL)
-              IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS signup_timestamp
-  FROM base
-  GROUP BY 1
+-- 5) Rollup per user
+user_rollup as (
+  select
+    user_pseudo_id,
+    min(event_date) as first_seen,
+    min(event_ts)   as first_seen_ts,
+    count(distinct session_key)                                           as sessions_by_key,
+    count(distinct if(site_name = 'Microsite', session_key, null))        as microsite_sessions,
+    array_agg(if(event_name in ('sign_up','user_signup'), event_ts, null)
+              ignore nulls order by event_ts asc)[safe_offset(0)]         as signup_timestamp,
+    count(*)                                                              as event_rows
+  from sessions
+  group by user_pseudo_id
 )
 
-/* ---------- 5) Final output ---------- */
-SELECT
+-- 6) Final user table
+select
   r.user_pseudo_id,
+  uid.user_id,
   r.first_seen,
-
-  CASE
-    WHEN r.sessions_by_key > 0 THEN r.sessions_by_key
-    ELSE 1
-  END AS total_sessions,
-
-  IF(r.signup_timestamp IS NULL, 0, 1) AS signup_occurred,
-  r.signup_timestamp                   AS signup_timestamp,
-  DATE(r.signup_timestamp)             AS signup_date,
-
-  ts.first_ts_source   AS first_utm_source,
-  ts.first_ts_medium   AS first_utm_medium,
-  ts.first_ts_campaign AS first_utm_campaign,
-
+  case when r.sessions_by_key > 0 then r.sessions_by_key
+       when r.event_rows      > 0 then 1 else 0 end                       as total_sessions,
+  if(r.signup_timestamp is null, 0, 1)                                     as signup_occurred,
+  r.signup_timestamp,
+  date(r.signup_timestamp)                                                 as signup_date,
+  fts.first_utm_source,
+  fts.first_utm_medium,
+  fts.first_utm_campaign,
   r.microsite_sessions,
-
   fdg.first_geo_country,
   fdg.first_device_category,
   fdg.first_device_operating_system,
   fdg.first_mobile_brand_name,
   fdg.first_mobile_model_name,
   fdg.first_platform
-FROM user_rollup r
-LEFT JOIN first_from_ts    ts  USING (user_pseudo_id)
-LEFT JOIN first_device_geo fdg USING (user_pseudo_id)
+from user_rollup r
+left join user_id_latest   uid using (user_pseudo_id)
+left join first_from_ts    fts using (user_pseudo_id)
+left join first_device_geo fdg using (user_pseudo_id)
