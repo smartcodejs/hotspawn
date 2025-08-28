@@ -1,8 +1,10 @@
 warehouse: bigquery
 defaultDatabase: hotspawn-440312
-defaultSchema: core_default                # we'll override per model
-assertionSchema: ga4_dq
+defaultSchema: ga4_production
 vars:
+  schema: "ga4_production"        # staging release overrides to ga4_staging
   timezone: "Europe/Bratislava"
-  backfill_days: "7"                       # window to recompute on incremental runs
+  backfill_days: "7"
+
+
 

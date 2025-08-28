@@ -1,9 +1,10 @@
-config { type: "view", tags: ["ga4","staging"] }
+config { type: "view", schema: dataform.projectConfig.vars.schema, tags: ["ga4","raw"] }
 
 SELECT
   user_pseudo_id,
   TIMESTAMP_MICROS(event_timestamp) AS event_ts,
-  DATE(TIMESTAMP_MICROS(event_timestamp), 'Europe/Bratislava') AS event_date,
+  DATE(TIMESTAMP_MICROS(event_timestamp),
+       '${dataform.projectConfig.vars.timezone || "Europe/Bratislava"}') AS event_date,
   event_name,
   (SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key='ga_session_id') AS ga_session_id,
   CONCAT(
@@ -24,5 +25,6 @@ SELECT
   (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key='site_name') AS site_name
 FROM `hotspawn-440312.analytics_457395054.events_*`
 WHERE _TABLE_SUFFIX BETWEEN '20240101'
-  AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('Europe/Bratislava'))
+  AND FORMAT_DATE('%Y%m%d',
+      CURRENT_DATE('${dataform.projectConfig.vars.timezone || "Europe/Bratislava"}'))
   AND user_pseudo_id IS NOT NULL
