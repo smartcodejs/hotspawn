@@ -4,6 +4,6 @@ defaultSchema: dataform
 defaultLocation: EU
 
 vars:
-  schema: ga4_staging                       # release will override to ga4_production
+  schema: ga4_staging                  # Release overrides to ga4_production later
   timezone: "Europe/Bratislava"
-  raw_start_date: "20100101"                # very wide; change to your true earliest if you want
+  raw_start_date: "20240101"           # set earlier if you want more history
