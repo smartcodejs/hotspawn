@@ -2,23 +2,42 @@ config {
   type: "table",
   schema: dataform.projectConfig.vars.schema,
   tags: ["ga4","intermediate","sessions"],
-  bigquery: {
-    partitionBy: "DATE(session_start_ts)",
-    clusterBy: ["user_pseudo_id","ga_session_id"],
-    requirePartitionFilter: false
-  }
+  bigquery: { partitionBy: "session_date", clusterBy: ["session_id"] }
 }
 
+CREATE SCHEMA IF NOT EXISTS `hotspawn-440312.ga4_staging` OPTIONS(location="EU");
+
+CREATE OR REPLACE TABLE `hotspawn-440312.ga4_staging.int_sessions`
+PARTITION BY DATE(session_start_ts)
+CLUSTER BY user_pseudo_id, ga_session_id
+AS
 WITH base AS (
   SELECT
-    user_pseudo_id, event_ts, event_date, event_name,
-    ga_session_id,
-    session_source, session_medium, session_campaign,
-    site_name,
-    geo_country, device_category, device_operating_system, platform,
-    engagement_time_msec, page_location
-  FROM ${ref("raw_sessions_source")}
+    user_pseudo_id,
+    TIMESTAMP_MICROS(event_timestamp) AS event_ts,
+    DATE(TIMESTAMP_MICROS(event_timestamp)) AS event_date,
+    event_name,
+    (SELECT ep.value.int_value
+     FROM UNNEST(event_params) ep
+     WHERE ep.key = 'ga_session_id') AS ga_session_id,
+    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'source')   AS session_source,
+    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'medium')   AS session_medium,
+    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'campaign') AS session_campaign
+  FROM `hotspawn-440312.analytics_457395054.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20240101' AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
 ),
 
--- … your sessions logic …
-SELECT * FROM /* your final CTE */
+session_starts AS (
+  SELECT
+    user_pseudo_id,
+    ga_session_id,
+    MIN(event_ts) AS session_start_ts,
+    ANY_VALUE(session_source)  AS session_source,
+    ANY_VALUE(session_medium)  AS session_medium,
+    ANY_VALUE(session_campaign) AS session_campaign
+  FROM base
+  WHERE event_name = 'session_start' AND ga_session_id IS NOT NULL
+  GROUP BY 1,2
+)
+
+SELECT * FROM session_starts
