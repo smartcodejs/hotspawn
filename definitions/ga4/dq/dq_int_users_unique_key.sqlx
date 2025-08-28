@@ -1,8 +1,6 @@
-config { type: "assertion", schema: dataform.projectConfig.vars.schema, tags: ["ga4","dq","users"] }
-
-WITH d AS (
-  SELECT user_pseudo_id, COUNT(*) c
-  FROM ${ref("int_users")}
-  GROUP BY 1
-)
-SELECT 1 FROM d WHERE c > 1 LIMIT 1
+config { type: "assertion", schema: dataform.projectConfig.vars.schema, tags: ["ga4","dq","user"] }
+SELECT user_pseudo_id
+FROM ${ref("int_users")}
+GROUP BY user_pseudo_id
+HAVING COUNT(*) > 1
+LIMIT 1

@@ -1,66 +1,63 @@
 config {
-  type: "incremental",
+  type: "table",
   schema: dataform.projectConfig.vars.schema,
-  name: "int_users",
-  tags: ["ga4","intermediate","users"],
-  bigquery: { partitionBy: "first_seen", clusterBy: ["user_pseudo_id"], requirePartitionFilter: true },
-  uniqueKey: ["user_pseudo_id"]
+  tags: ["ga4","intermediate","user"],
+  bigquery: {
+    partitionBy: "DATE(first_seen_ts)",
+    clusterBy: ["user_pseudo_id"],
+    requirePartitionFilter: true
+  }
 }
 
-WITH recent_users AS (
-  SELECT user_pseudo_id
-  FROM ${ref("raw_events")}
-  ${ incremental()
-      ? " WHERE event_date >= DATE_SUB(CURRENT_DATE('" +
-          (dataform.projectConfig.vars.timezone || "Europe/Bratislava") +
-          "'), INTERVAL " + (dataform.projectConfig.vars.backfill_days || 7) + " DAY)"
-      : "" }
-  GROUP BY 1
-),
-ub AS (
-  SELECT e.*
-  FROM ${ref("raw_events")} e
-  ${ incremental() ? " JOIN recent_users USING (user_pseudo_id)" : "" }
-),
-agg AS (
+-- Base events taken from the raw view
+WITH base AS (
   SELECT
     user_pseudo_id,
-    MIN(event_date) AS first_seen,
-    COUNT(DISTINCT session_key) AS sessions_by_key,
-    COUNT(*) AS event_rows,
-    ARRAY_AGG(IF(event_name IN ('sign_up','user_signup'), event_ts, NULL) IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS signup_timestamp,
-    COALESCE(
-      ARRAY_AGG(event_user_id    IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)],
-      ARRAY_AGG(userprop_user_id IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)]
-    ) AS user_id,
-    ARRAY_AGG(ts_source   IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_utm_source,
-    ARRAY_AGG(ts_medium   IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_utm_medium,
-    ARRAY_AGG(ts_campaign IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_utm_campaign,
-    ARRAY_AGG(geo_country             IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_geo_country,
-    ARRAY_AGG(device_category         IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_device_category,
-    ARRAY_AGG(device_operating_system IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_device_operating_system,
-    ARRAY_AGG(mobile_brand_name       IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_mobile_brand_name,
-    ARRAY_AGG(mobile_model_name       IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_mobile_model_name,
-    ARRAY_AGG(platform                IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_platform
-  FROM ub
-  GROUP BY 1
+    event_name,
+    event_ts,
+    ts_source, ts_medium, ts_campaign,
+    geo_country, device_category, device_operating_system,
+    mobile_brand_name, mobile_model_name, platform
+  FROM ${ref("raw_events")}
+),
+
+-- First/last markers and first-known attributes
+marks AS (
+  SELECT
+    user_pseudo_id,
+    MIN(event_ts) AS first_seen_ts,
+    MIN(IF(event_name = 'session_start', event_ts, NULL)) AS first_session_ts,
+    MAX(IF(event_name = 'session_start', event_ts, NULL)) AS last_session_ts,
+    COUNTIF(event_name = 'session_start') AS total_sessions,
+    MIN(IF(event_name IN ('sign_up', 'user_signup'), event_ts, NULL)) AS signup_ts,
+
+    ARRAY_AGG(ts_source            IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_source,
+    ARRAY_AGG(ts_medium            IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_medium,
+    ARRAY_AGG(ts_campaign          IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_campaign,
+    ARRAY_AGG(geo_country          IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_country,
+    ARRAY_AGG(device_category      IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_device_category,
+    ARRAY_AGG(device_operating_system IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_os,
+    ARRAY_AGG(mobile_brand_name    IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_mobile_brand,
+    ARRAY_AGG(mobile_model_name    IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_mobile_model,
+    ARRAY_AGG(platform             IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_platform
+  FROM base
+  GROUP BY user_pseudo_id
 )
 
 SELECT
   user_pseudo_id,
-  user_id,
-  first_seen,
-  CASE WHEN sessions_by_key > 0 THEN sessions_by_key
-       WHEN event_rows      > 0 THEN 1 ELSE 0 END AS total_sessions,
-  signup_timestamp,
-  DATE(signup_timestamp, '${dataform.projectConfig.vars.timezone || "Europe/Bratislava"}') AS signup_date,
-  signup_timestamp IS NOT NULL AS signup_occurred,
-  first_utm_source,
-  first_utm_medium,
-  first_utm_campaign,
-  first_geo_country,
-  first_device_category,
-  first_device_operating_system,
-  first_mobile_brand_name,
-  first_mobile_model_name,
-  first_platform
+  first_seen_ts,
+  DATE(first_seen_ts, "${dataform.projectConfig.vars.timezone}") AS first_seen_date,
+
+  signup_ts,
+  DATE(signup_ts, "${dataform.projectConfig.vars.timezone}") AS signup_date,
+  IF(signup_ts IS NOT NULL, 1, 0) AS is_signed_up,
+
+  first_session_ts,
+  last_session_ts,
+  total_sessions,
+
+  first_source, first_medium, first_campaign,
+  first_country, first_device_category, first_os,
+  first_mobile_brand, first_mobile_model, first_platform
+FROM marks
