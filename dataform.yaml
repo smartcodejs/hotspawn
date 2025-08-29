@@ -1,10 +1,10 @@
 warehouse: bigquery
 defaultDatabase: hotspawn-440312
 defaultSchema: ga4_staging
-defaultLocation: EU    
+defaultLocation: EU
+
 vars:
   schema: ga4_staging
-  ga4_dataset: analytics_457395854   # <-- your GA4 dataset ID
-  raw_start_date: "20240101"         # <-- set the history start you want
+  ga4_dataset: analytics_457395054 
+  raw_start_date: "20240101"
   timezone: "Europe/Bratislava"
-
