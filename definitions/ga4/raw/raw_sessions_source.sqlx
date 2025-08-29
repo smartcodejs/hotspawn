@@ -17,5 +17,5 @@ SELECT
   geo.country     AS geo_country,
   device.category AS device_category,
   platform
-FROM `hotspawn-440312.analytics_457395854.events_*`
+FROM `hotspawn-440312.analytics_457395054.events_*`
 WHERE _TABLE_SUFFIX BETWEEN '20240101' AND '20991231'
