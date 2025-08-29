@@ -1,18 +1,16 @@
 config {
   type: "view",
-  schema: dataform.projectConfig.vars.schema,
+  schema: "ga4_staging",
   tags: ["ga4","raw","page"]
 }
 
-/* Only page_view events; minimal fields used later for pageview marts */
 SELECT
-  TIMESTAMP_MICROS(event_timestamp)                                                    AS event_ts,
-  DATE(TIMESTAMP_MICROS(event_timestamp))                                              AS session_date,
+  TIMESTAMP_MICROS(event_timestamp) AS event_ts,
+  DATE(TIMESTAMP_MICROS(event_timestamp)) AS session_date,
   user_pseudo_id,
-  (SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'ga_session_id') AS ga_session_id,
+  (SELECT ep.value.int_value   FROM UNNEST(event_params) ep WHERE ep.key = 'ga_session_id') AS ga_session_id,
   (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_location') AS page_url,
   (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_title')    AS page_title
-FROM `hotspawn-440312.analytics_457395054.events_*`
+FROM `hotspawn-440312.analytics_457395854.events_*`
 WHERE event_name = 'page_view'
-  AND _TABLE_SUFFIX BETWEEN '20240101'
-  AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+  AND _TABLE_SUFFIX BETWEEN '20240101' AND '20991231'

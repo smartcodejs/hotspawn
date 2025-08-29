@@ -1,14 +1,10 @@
 config {
   type: "table",
-  schema: dataform.projectConfig.vars.schema,
+  schema: "ga4_staging",
   tags: ["ga4","mart","sessions"],
-  bigquery: {
-    partitionBy: "date",
-    clusterBy: ["pseud_id","session_id"]
-  }
+  bigquery: { partitionBy: "date", clusterBy: ["pseud_id","session_id"] }
 }
 
--- Shape matches your screenshot (date/site_name/session_time/.../user_signup)
 SELECT
   date,
   site_name,

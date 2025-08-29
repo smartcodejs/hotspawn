@@ -1,29 +1,23 @@
 config {
   type: "table",
-  schema: dataform.projectConfig.vars.schema,
+  schema: "ga4_staging",
   tags: ["ga4","intermediate","users"],
-  bigquery: {
-    partitionBy: "first_seen",
-    clusterBy: ["user_pseudo_id"]
-  }
+  bigquery: { partitionBy: "first_seen", clusterBy: ["user_pseudo_id"] }
 }
 
 WITH base AS (
-  SELECT *
-  FROM ${ref("raw_users_source")}
+  SELECT * FROM ${ref("raw_users_source")}
 ),
-
 user_id_latest AS (
   SELECT
     user_pseudo_id,
     COALESCE(
-      ARRAY_AGG(event_user_id IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)],
+      ARRAY_AGG(event_user_id    IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)],
       ARRAY_AGG(userprop_user_id IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)]
     ) AS user_id
   FROM base
   GROUP BY user_pseudo_id
 ),
-
 geo_device_last AS (
   SELECT
     user_pseudo_id,
@@ -36,15 +30,15 @@ geo_device_last AS (
 
 SELECT
   b.user_pseudo_id,
-  uid.user_id,
-  MIN(b.event_date) AS first_seen,
-  COUNT(DISTINCT IF(event_name = 'session_start', ga_session_id, NULL)) AS total_sessions,
+  u.user_id,
+  MIN(event_date) AS first_seen,
+  COUNT(DISTINCT ga_session_id) AS total_sessions,
   IF(COUNTIF(event_name IN ('sign_up','user_signup')) > 0, 1, 0) AS signup_occurred,
   IF(COUNTIF(event_name = 'first_visit') > 0, 'New User', 'Returning User') AS user_type,
   g.last_geo_country,
   g.last_device_category,
   g.last_platform
 FROM base b
-LEFT JOIN user_id_latest  uid USING (user_pseudo_id)
-LEFT JOIN geo_device_last g   USING (user_pseudo_id)
-GROUP BY b.user_pseudo_id, uid.user_id, g.last_geo_country, g.last_device_category, g.last_platform
+LEFT JOIN user_id_latest  u ON u.user_pseudo_id = b.user_pseudo_id
+LEFT JOIN geo_device_last g ON g.user_pseudo_id = b.user_pseudo_id
+GROUP BY b.user_pseudo_id, u.user_id, g.last_geo_country, g.last_device_category, g.last_platform

@@ -1,27 +1,22 @@
 config {
   type: "table",
-  schema: dataform.projectConfig.vars.schema,
+  schema: "ga4_staging",
   tags: ["ga4","intermediate","sessions"],
-  bigquery: {
-    partitionBy: "date",
-    clusterBy: ["user_pseudo_id","ga_session_id"]
-  }
+  bigquery: { partitionBy: "date", clusterBy: ["pseud_id","session_id"] }
 }
 
 WITH base AS (
   SELECT * FROM ${ref("raw_sessions_source")}
 ),
-
 session_bounds AS (
   SELECT
     user_pseudo_id,
     ga_session_id,
-    MIN(event_ts)   AS session_start_ts,
-    MIN(event_date) AS session_date
+    MIN(event_ts) AS session_start_ts,
+    MIN(event_date) AS date
   FROM base
   GROUP BY 1,2
 ),
-
 utm AS (
   SELECT
     user_pseudo_id,
@@ -33,7 +28,6 @@ utm AS (
   FROM base
   GROUP BY 1,2
 ),
-
 geo_device AS (
   SELECT
     user_pseudo_id,
@@ -44,25 +38,24 @@ geo_device AS (
   FROM base
   GROUP BY 1,2
 ),
-
 metrics AS (
   SELECT
     user_pseudo_id,
     ga_session_id,
-    COUNTIF(event_name = 'page_view')                              AS page_view,
-    IF(COUNTIF(event_name = 'page_view') = 1, 1, 0)               AS bounces,
-    IF(COUNTIF(event_name = 'user_engagement') > 0, 1, 0)         AS engaged_session,
-    COUNTIF(event_name IN ('sign_up','user_signup'))               AS user_signup,
+    COUNTIF(event_name = 'page_view') AS page_view,
+    IF(COUNTIF(event_name = 'page_view') = 1, 1, 0) AS bounces,
+    IF(COUNTIF(event_name = 'user_engagement') > 0, 1, 0) AS engaged_session,
+    COUNTIF(event_name IN ('sign_up','user_signup')) AS user_signup,
     IF(COUNTIF(event_name = 'first_visit') > 0, 'New User', 'Returning User') AS user_type
   FROM base
   GROUP BY user_pseudo_id, ga_session_id
 )
 
 SELECT
-  sb.session_date                           AS date,
+  sb.date,
   utm.site_name,
-  TIME(sb.session_start_ts)                 AS session_time,
-  sb.user_pseudo_id                         AS pseud_id,
+  TIME(sb.session_start_ts) AS session_time,
+  sb.user_pseudo_id         AS pseud_id,
   CONCAT(sb.user_pseudo_id, '-', CAST(sb.ga_session_id AS STRING)) AS session_id,
   gd.country,
   gd.device,
@@ -85,6 +78,6 @@ SELECT
   m.page_view,
   m.user_signup
 FROM session_bounds sb
-JOIN utm        USING (user_pseudo_id, ga_session_id)
-JOIN geo_device gd   USING (user_pseudo_id, ga_session_id)
-JOIN metrics    m    USING (user_pseudo_id, ga_session_id)
+JOIN utm        ON utm.user_pseudo_id = sb.user_pseudo_id AND utm.ga_session_id = sb.ga_session_id
+JOIN geo_device gd ON gd.user_pseudo_id = sb.user_pseudo_id AND gd.ga_session_id = sb.ga_session_id
+JOIN metrics    m  ON m.user_pseudo_id  = sb.user_pseudo_id AND m.ga_session_id  = sb.ga_session_id

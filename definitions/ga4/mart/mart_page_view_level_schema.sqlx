@@ -1,14 +1,10 @@
 config {
   type: "table",
-  schema: dataform.projectConfig.vars.schema,
+  schema: "ga4_staging",
   tags: ["ga4","mart","pageviews"],
-  bigquery: {
-    partitionBy: "session_date",
-    clusterBy: ["user_pseudo_id","session_id"]
-  }
+  bigquery: { partitionBy: "session_date", clusterBy: ["user_pseudo_id","session_id"] }
 }
 
--- Shape matches your screenshot (session_date/.../exit_page_url)
 SELECT
   session_date,
   user_pseudo_id,

@@ -1,11 +1,8 @@
 config {
   type: "table",
-  schema: dataform.projectConfig.vars.schema,
+  schema: "ga4_staging",
   tags: ["ga4","mart","users"],
-  bigquery: {
-    partitionBy: "DATE(first_seen)",
-    clusterBy: ["user_pseudo_id"]
-  }
+  bigquery: { partitionBy: "first_seen", clusterBy: ["user_pseudo_id"] }
 }
 
 SELECT
