@@ -4,23 +4,37 @@ config {
   tags: ["ga4","raw","users"]
 }
 
--- For user-level rollups & first-touch attribution
+/* One projection of events for user-level rollups + first-touch */
 SELECT
-  TIMESTAMP_MICROS(event_timestamp) AS event_ts,
-  DATE(TIMESTAMP_MICROS(event_timestamp)) AS event_date,
+  TIMESTAMP_MICROS(event_timestamp)                             AS event_ts,
+  DATE(TIMESTAMP_MICROS(event_timestamp))                      AS event_date,
   user_pseudo_id,
-  user_id AS event_user_id,
-  (SELECT up.value.string_value FROM UNNEST(user_properties) up WHERE up.key = 'user_id') AS userprop_user_id,
 
-  traffic_source.source AS ts_source,
-  traffic_source.medium AS ts_medium,
-  traffic_source.name   AS ts_campaign,
+  -- top-level + fallback user_id
+  user_id                                                       AS event_user_id,
+  (SELECT up.value.string_value FROM UNNEST(user_properties) up
+    WHERE up.key = 'user_id')                                   AS userprop_user_id,
 
-  (SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'ga_session_id') AS ga_session_id,
-  event_name,
-  geo.country     AS geo_country,
-  device.category AS device_category,
-  platform
-FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.ga4_dataset}.events_*`
-WHERE _TABLE_SUFFIX BETWEEN '${dataform.projectConfig.vars.raw_start_date}'
-                        AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+  -- GA4 traffic_source (first touch)
+  traffic_source.source                                         AS ts_source,
+  traffic_source.medium                                         AS ts_medium,
+  traffic_source.name                                           AS ts_campaign,
+
+  -- session params (present usually on session_start)
+  (SELECT ep.value.int_value    FROM UNNEST(event_params) ep WHERE ep.key = 'ga_session_id') AS ga_session_id,
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'source')        AS session_source,
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'medium')        AS session_medium,
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'campaign')      AS session_campaign,
+
+  -- geo / device snapshot
+  geo.country                                                   AS geo_country,
+  device.category                                               AS device_category,
+  platform,
+
+  -- optional site flag used later
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'site_name')     AS site_name,
+
+  event_name
+FROM `hotspawn-440312.analytics_457395854.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20240101'
+  AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())

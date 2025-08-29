@@ -1,10 +1,10 @@
 warehouse: bigquery
-defaultDatabase: hotspawn-440312          # <- your GCP project
-defaultSchema: dataform
-defaultLocation: EU
-
+defaultDatabase: hotspawn-440312
+defaultSchema: ga4_staging
+defaultLocation: EU    
 vars:
-  schema: ga4_staging                      # change to ga4_production when ready
-  ga4_dataset: analytics_457395054         # <- CHANGE to your GA4 dataset id
-  raw_start_date: "20240101"
+  schema: ga4_staging
+  ga4_dataset: analytics_457395854   # <-- your GA4 dataset ID
+  raw_start_date: "20240101"         # <-- set the history start you want
   timezone: "Europe/Bratislava"
+
