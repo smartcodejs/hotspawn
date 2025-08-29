@@ -4,9 +4,10 @@ config {
   tags: ["ga4","intermediate","sessions"],
   bigquery: {
     partitionBy: "date",
-    clusterBy: ["user_pseudo_id","ga_session_id"]
+    clusterBy: ["user_pseudo_id","session_id"]
   }
 }
+
 
 
 

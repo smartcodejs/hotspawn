@@ -8,6 +8,7 @@ config {
   }
 }
 
+
 WITH page_views AS (
   SELECT
     session_date,
