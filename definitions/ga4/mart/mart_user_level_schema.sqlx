@@ -2,7 +2,10 @@ config {
   type: "table",
   schema: dataform.projectConfig.vars.schema,
   tags: ["ga4","mart","users"],
-  bigquery: { partitionBy: "DATE(first_seen)" }
+  bigquery: {
+    partitionBy: "DATE(first_seen)",
+    clusterBy: ["user_pseudo_id"]
+  }
 }
 
 SELECT
@@ -11,9 +14,7 @@ SELECT
   first_seen,
   total_sessions,
   signup_occurred,
-  first_utm_source,
-  first_utm_medium,
-  first_utm_campaign,
+  user_type,
   last_geo_country,
   last_device_category,
   last_platform

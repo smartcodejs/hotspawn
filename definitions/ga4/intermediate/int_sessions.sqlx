@@ -9,74 +9,84 @@ config {
 }
 
 WITH base AS (
-  SELECT * FROM ${ref("raw_sessions_source")}
+  SELECT *
+  FROM ${ref("raw_sessions_source")}
 ),
 
-per_session AS (
+session_bounds AS (
   SELECT
     user_pseudo_id,
     ga_session_id,
+    MIN(event_ts)   AS session_start_ts,
+    MIN(event_date) AS session_date
+  FROM base
+  GROUP BY 1,2
+),
 
-    MIN(event_ts) AS session_start_ts,
-    MAX(event_ts) AS session_end_ts,
-
-    -- First non-null within the session
-    ARRAY_AGG(site_name       IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS site_name,
+utm AS (
+  SELECT
+    user_pseudo_id,
+    ga_session_id,
     ARRAY_AGG(session_source  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS session_source,
     ARRAY_AGG(session_medium  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS session_medium,
     ARRAY_AGG(session_campaign IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS session_campaign,
-
-    -- Last known device/geo/platform in the session
-    ARRAY_AGG(geo_country     IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS geo_country,
-    ARRAY_AGG(device_category IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS device_category,
-    ARRAY_AGG(platform        IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS platform,
-
-    -- Counts
-    COUNTIF(event_name = 'page_view')           AS page_views,
-    COUNTIF(event_name = 'user_engagement') > 0 AS has_engagement
+    ARRAY_AGG(site_name       IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS site_name
   FROM base
-  GROUP BY user_pseudo_id, ga_session_id
+  GROUP BY 1,2
 ),
 
-with_user AS (
+geo_device AS (
   SELECT
-    s.*,
-    u.first_seen,
-    u.signup_occurred
-  FROM per_session s
-  LEFT JOIN ${ref("int_users")} u USING (user_pseudo_id)
+    user_pseudo_id,
+    ga_session_id,
+    ARRAY_AGG(geo_country     IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS country,
+    ARRAY_AGG(device_category IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS device,
+    ARRAY_AGG(platform        IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS platform
+  FROM base
+  GROUP BY 1,2
+),
+
+metrics AS (
+  SELECT
+    user_pseudo_id,
+    ga_session_id,
+    COUNTIF(event_name = 'page_view')                              AS page_view,
+    IF(COUNTIF(event_name = 'page_view') = 1, 1, 0)               AS bounces,
+    IF(COUNTIF(event_name = 'user_engagement') > 0, 1, 0)         AS engaged_session,
+    COUNTIF(event_name IN ('sign_up','user_signup'))               AS user_signup,
+    -- derive user_type purely from this session’s events
+    IF(COUNTIF(event_name = 'first_visit') > 0, 'New User', 'Returning User') AS user_type
+  FROM base
+  GROUP BY user_pseudo_id, ga_session_id
 )
 
 SELECT
-  DATE(session_start_ts)                                               AS date,
-  COALESCE(site_name, 'hotspawn')                                      AS site_name,
-  TIME(session_start_ts)                                               AS session_time,
-  user_pseudo_id                                                       AS pseud_id,
-  CONCAT(user_pseudo_id, '-', CAST(ga_session_id AS STRING))           AS session_id,
-  geo_country                                                          AS country,
-  device_category                                                      AS device,
-  platform,
-
-  CASE WHEN DATE(session_start_ts) = first_seen THEN 'New User' ELSE 'Returning User' END AS user_type,
-
-  -- simple channel grouping
+  sb.session_date                           AS date,
+  utm.site_name,
+  TIME(sb.session_start_ts)                 AS session_time,
+  sb.user_pseudo_id                         AS pseud_id,
+  CONCAT(sb.user_pseudo_id, '-', CAST(sb.ga_session_id AS STRING)) AS session_id,
+  gd.country,
+  gd.device,
+  gd.platform,
+  m.user_type,
   CASE
-    WHEN session_medium IS NULL OR session_medium IN ('(not set)','(none)') THEN 'Direct'
-    WHEN LOWER(session_medium) IN ('cpc','ppc','paidsearch','sem')            THEN 'Paid Search'
-    WHEN LOWER(session_medium) LIKE '%social%' OR LOWER(session_source) IN ('facebook','instagram','twitter','tiktok','linkedin') THEN 'Social'
-    WHEN LOWER(session_medium) IN ('email')                                   THEN 'Email'
-    WHEN LOWER(session_medium) IN ('affiliate')                               THEN 'Affiliate'
-    WHEN LOWER(session_medium) IN ('referral')                                THEN 'Referral'
-    WHEN LOWER(session_medium) IN ('display','cpm')                           THEN 'Display'
+    WHEN (utm.session_source IS NULL OR utm.session_source = '')
+       AND (utm.session_medium IS NULL OR utm.session_medium IN ('', '(not set)', '(none)')) THEN 'Direct'
+    WHEN LOWER(utm.session_medium) IN ('cpc','ppc','paidsearch') THEN 'Paid Search'
+    WHEN LOWER(utm.session_medium) = 'organic' THEN 'Organic Search'
+    WHEN LOWER(utm.session_medium) IN ('social','paid_social') THEN 'Social'
+    WHEN LOWER(utm.session_medium) = 'email' THEN 'Email'
     ELSE 'Other'
   END AS channel_grouping,
-
-  session_source,
-  session_medium,
-  session_campaign,
-
-  IF(page_views = 1 AND NOT has_engagement, 1, 0)                     AS bounces,
-  IF(has_engagement, 1, 0)                                            AS engaged_session,
-  page_views                                                          AS page_view,
-  IF(signup_occurred, 1, 0)                                           AS user_signup
-FROM with_user
+  utm.session_source,
+  utm.session_medium,
+  utm.session_campaign,
+  m.engaged_session,
+  m.bounces,
+  m.page_view,
+  m.user_signup
+FROM session_bounds sb
+JOIN utm       USING (user_pseudo_id, ga_session_id)
+JOIN geo_device gd  USING (user_pseudo_id, ga_session_id)
+JOIN metrics   m    USING (user_pseudo_id, ga_session_id)

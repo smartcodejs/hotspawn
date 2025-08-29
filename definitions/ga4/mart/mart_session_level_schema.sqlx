@@ -2,10 +2,13 @@ config {
   type: "table",
   schema: dataform.projectConfig.vars.schema,
   tags: ["ga4","mart","sessions"],
-  bigquery: { partitionBy: "date", clusterBy: ["pseud_id","session_id"] }
+  bigquery: {
+    partitionBy: "date",
+    clusterBy: ["pseud_id","session_id"]
+  }
 }
 
-/* EXACT columns as in your screenshot */
+-- Shape matches your screenshot (date/site_name/session_time/.../user_signup)
 SELECT
   date,
   site_name,
@@ -20,8 +23,8 @@ SELECT
   session_source,
   session_medium,
   session_campaign,
-  bounces,
   engaged_session,
+  bounces,
   page_view,
   user_signup
 FROM ${ref("int_sessions")}

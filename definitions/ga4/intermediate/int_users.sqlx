@@ -2,18 +2,14 @@ config {
   type: "table",
   schema: dataform.projectConfig.vars.schema,
   tags: ["ga4","intermediate","users"],
-  bigquery: { partitionBy: "DATE(first_seen)" }
+  bigquery: {
+    partitionBy: "DATE(first_seen)",
+    clusterBy: ["user_pseudo_id"]
+  }
 }
 
-/* Base from raw users view */
 WITH base AS (
-  SELECT
-    user_pseudo_id, event_ts, event_date, event_name,
-    ga_session_id,
-    ts_source, ts_medium, ts_campaign,
-    session_source, session_medium, session_campaign,
-    geo_country, device_category, platform, site_name,
-    event_user_id, userprop_user_id
+  SELECT *
   FROM ${ref("raw_users_source")}
 ),
 
@@ -28,28 +24,7 @@ user_id_latest AS (
   GROUP BY user_pseudo_id
 ),
 
-first_from_ts AS (
-  SELECT
-    user_pseudo_id,
-    ARRAY_AGG(ts_source   IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_ts_source,
-    ARRAY_AGG(ts_medium   IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_ts_medium,
-    ARRAY_AGG(ts_campaign IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_ts_campaign
-  FROM base
-  GROUP BY user_pseudo_id
-),
-
-first_from_session AS (
-  SELECT
-    user_pseudo_id,
-    ARRAY_AGG(session_source  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_sess_source,
-    ARRAY_AGG(session_medium  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_sess_medium,
-    ARRAY_AGG(session_campaign IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_sess_campaign
-  FROM base
-  WHERE event_name = 'session_start'
-  GROUP BY user_pseudo_id
-),
-
-last_geo_device AS (
+geo_device_last AS (
   SELECT
     user_pseudo_id,
     ARRAY_AGG(geo_country     IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS last_geo_country,
@@ -57,32 +32,19 @@ last_geo_device AS (
     ARRAY_AGG(platform        IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS last_platform
   FROM base
   GROUP BY user_pseudo_id
-),
-
-user_rollup AS (
-  SELECT
-    user_pseudo_id,
-    MIN(event_date) AS first_seen,
-    COUNT(DISTINCT IF(event_name = 'session_start', ga_session_id, NULL)) AS total_sessions,
-    LOGICAL_OR(event_name IN ('sign_up','user_signup')) AS signup_occurred
-  FROM base
-  GROUP BY user_pseudo_id
 )
 
 SELECT
-  r.user_pseudo_id,
+  b.user_pseudo_id,
   uid.user_id,
-  r.first_seen,
-  r.total_sessions,
-  r.signup_occurred,
-  COALESCE(ts.first_ts_source,   sess.first_sess_source)   AS first_utm_source,
-  COALESCE(ts.first_ts_medium,   sess.first_sess_medium)   AS first_utm_medium,
-  COALESCE(ts.first_ts_campaign, sess.first_sess_campaign) AS first_utm_campaign,
-  lgd.last_geo_country,
-  lgd.last_device_category,
-  lgd.last_platform
-FROM user_rollup r
-LEFT JOIN user_id_latest      uid  USING (user_pseudo_id)
-LEFT JOIN first_from_ts       ts   USING (user_pseudo_id)
-LEFT JOIN first_from_session  sess USING (user_pseudo_id)
-LEFT JOIN last_geo_device     lgd  USING (user_pseudo_id)
+  MIN(b.event_date)                                              AS first_seen,
+  COUNT(DISTINCT b.ga_session_id)                                AS total_sessions,
+  IF(COUNTIF(b.event_name IN ('sign_up','user_signup')) > 0, 1, 0) AS signup_occurred,
+  IF(COUNTIF(b.event_name = 'first_visit') > 0, 'New User', 'Returning User') AS user_type,
+  g.last_geo_country,
+  g.last_device_category,
+  g.last_platform
+FROM base b
+LEFT JOIN user_id_latest  uid USING (user_pseudo_id)
+LEFT JOIN geo_device_last g   USING (user_pseudo_id)
+GROUP BY b.user_pseudo_id, uid.user_id, g.last_geo_country, g.last_device_category, g.last_platform

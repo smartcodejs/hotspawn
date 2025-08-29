@@ -4,26 +4,26 @@ config {
   tags: ["ga4","raw","sessions"]
 }
 
+-- One light projection of all events with session / UTM / geo / device info
 SELECT
-  TIMESTAMP_MICROS(event_timestamp)                                    AS event_ts,
-  DATE(TIMESTAMP_MICROS(event_timestamp))                               AS event_date,
+  _TABLE_SUFFIX AS tbl_suffix,
+  TIMESTAMP_MICROS(event_timestamp) AS event_ts,
+  DATE(TIMESTAMP_MICROS(event_timestamp)) AS event_date,
   user_pseudo_id,
-  (SELECT ep.value.int_value FROM UNNEST(event_params) ep
-     WHERE ep.key = 'ga_session_id')                                   AS ga_session_id,
+  (SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'ga_session_id') AS ga_session_id,
+  event_name,
 
-  (SELECT ep.value.string_value FROM UNNEST(event_params) ep
-     WHERE ep.key = 'site_name')                                       AS site_name,
+  -- explicit UTM on the event (typical on session_start)
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'source')   AS session_source,
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'medium')   AS session_medium,
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'campaign') AS session_campaign,
 
-  (SELECT ep.value.string_value FROM UNNEST(event_params) ep
-     WHERE ep.key = 'source')                                          AS session_source,
-  (SELECT ep.value.string_value FROM UNNEST(event_params) ep
-     WHERE ep.key = 'medium')                                          AS session_medium,
-  (SELECT ep.value.string_value FROM UNNEST(event_params) ep
-     WHERE ep.key = 'campaign')                                        AS session_campaign,
+  -- microsite flag (if you use it)
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'site_name') AS site_name,
 
-  geo.country                                                          AS geo_country,
-  device.category                                                      AS device_category,
-  platform,
-  event_name
-FROM `${dataform.projectConfig.vars.ga4_dataset}.events_*`
-WHERE _TABLE_SUFFIX BETWEEN '20200101' AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+  geo.country     AS geo_country,
+  device.category AS device_category,
+  platform
+FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.ga4_dataset}.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '${dataform.projectConfig.vars.raw_start_date}'
+                        AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
