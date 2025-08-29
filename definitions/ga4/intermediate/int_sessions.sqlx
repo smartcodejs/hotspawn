@@ -4,16 +4,12 @@ config {
   tags: ["ga4","intermediate","sessions"],
   bigquery: {
     partitionBy: "date",
-    clusterBy: ["user_pseudo_id","session_id"]
+    clusterBy: ["user_pseudo_id","ga_session_id"]
   }
 }
 
-
-
-
 WITH base AS (
-  SELECT *
-  FROM ${ref("raw_sessions_source")}
+  SELECT * FROM ${ref("raw_sessions_source")}
 ),
 
 session_bounds AS (
@@ -57,7 +53,6 @@ metrics AS (
     IF(COUNTIF(event_name = 'page_view') = 1, 1, 0)               AS bounces,
     IF(COUNTIF(event_name = 'user_engagement') > 0, 1, 0)         AS engaged_session,
     COUNTIF(event_name IN ('sign_up','user_signup'))               AS user_signup,
-    -- derive user_type purely from this session’s events
     IF(COUNTIF(event_name = 'first_visit') > 0, 'New User', 'Returning User') AS user_type
   FROM base
   GROUP BY user_pseudo_id, ga_session_id
@@ -90,6 +85,6 @@ SELECT
   m.page_view,
   m.user_signup
 FROM session_bounds sb
-JOIN utm       USING (user_pseudo_id, ga_session_id)
-JOIN geo_device gd  USING (user_pseudo_id, ga_session_id)
-JOIN metrics   m    USING (user_pseudo_id, ga_session_id)
+JOIN utm        USING (user_pseudo_id, ga_session_id)
+JOIN geo_device gd   USING (user_pseudo_id, ga_session_id)
+JOIN metrics    m    USING (user_pseudo_id, ga_session_id)

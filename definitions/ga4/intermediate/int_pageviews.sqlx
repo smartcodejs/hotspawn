@@ -8,61 +8,60 @@ config {
   }
 }
 
-
 WITH page_views AS (
   SELECT
-    session_date,
+    DATE(TIMESTAMP_MICROS(event_timestamp)) AS session_date,
     user_pseudo_id,
-    CONCAT(user_pseudo_id, '-', CAST(ga_session_id AS STRING)) AS session_id,
-    event_ts AS pageview_time,
-    page_url,
-    page_title
-  FROM ${ref("raw_page_source")}
+    CONCAT(
+      user_pseudo_id, '-',
+      CAST((SELECT p.value.int_value FROM UNNEST(event_params) p WHERE p.key = 'ga_session_id') AS STRING)
+    ) AS session_id,
+    TIMESTAMP_MICROS(event_timestamp) AS pageview_time,
+    (SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key = 'page_location') AS page_url,
+    (SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key = 'page_title') AS page_title
+  FROM `hotspawn-440312.analytics_457395054.events_*`
+  WHERE event_name = 'page_view'
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
 ),
 
--- derive user_type from GA events (no int_* dependency)
 user_type AS (
   SELECT
     user_pseudo_id,
     IF(COUNTIF(event_name = 'first_visit') > 0, 'New User', 'Returning User') AS user_type
-  FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.ga4_dataset}.events_*`
-  WHERE _TABLE_SUFFIX BETWEEN '${dataform.projectConfig.vars.raw_start_date}'
-                          AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+  FROM `hotspawn-440312.analytics_457395054.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20240101' AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
   GROUP BY user_pseudo_id
 ),
 
 article_data AS (
   SELECT
     user_pseudo_id,
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_location') AS page_url,
-    COALESCE(NULLIF((SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'author_name'), ''), 'hotspawn') AS author_name
-  FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.ga4_dataset}.events_*`
+    (SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key = 'page_location') AS page_url,
+    COALESCE(NULLIF((SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key = 'author_name'), ''), 'hotspawn') AS author_name
+  FROM `hotspawn-440312.analytics_457395054.events_*`
   WHERE event_name = 'article_view'
-    AND _TABLE_SUFFIX BETWEEN '${dataform.projectConfig.vars.raw_start_date}'
-                           AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
 ),
 
 scr_data AS (
   SELECT
-    CONCAT(user_pseudo_id, '-', CAST((SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'ga_session_id') AS STRING)) AS session_id,
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_location') AS page_url,
-    MAX((SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'scroll_percentage')) AS max_scroll_percentage
-  FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.ga4_dataset}.events_*`
+    CONCAT(user_pseudo_id, '-', CAST((SELECT p.value.int_value FROM UNNEST(event_params) p WHERE p.key = 'ga_session_id') AS STRING)) AS session_id,
+    (SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key = 'page_location') AS page_url,
+    MAX((SELECT p.value.int_value FROM UNNEST(event_params) p WHERE p.key = 'scroll_percentage')) AS max_scroll_percentage
+  FROM `hotspawn-440312.analytics_457395054.events_*`
   WHERE event_name IN ('scroll_depth','scroll')
-    AND _TABLE_SUFFIX BETWEEN '${dataform.projectConfig.vars.raw_start_date}'
-                           AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
   GROUP BY session_id, page_url
 ),
 
 time_spent_data AS (
   SELECT
-    CONCAT(user_pseudo_id, '-', CAST((SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'ga_session_id') AS STRING)) AS session_id,
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_location') AS page_url,
-    MAX(SAFE_CAST(REGEXP_EXTRACT((SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'time_spent'), r'^(\d+)') AS INT64)) AS max_time_on_page
-  FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.ga4_dataset}.events_*`
+    CONCAT(user_pseudo_id, '-', CAST((SELECT p.value.int_value FROM UNNEST(event_params) p WHERE p.key = 'ga_session_id') AS STRING)) AS session_id,
+    (SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key = 'page_location') AS page_url,
+    MAX(SAFE_CAST(REGEXP_EXTRACT((SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key = 'time_spent'), r'^(\d+)') AS INT64)) AS max_time_on_page
+  FROM `hotspawn-440312.analytics_457395054.events_*`
   WHERE event_name = 'time_on_page'
-    AND _TABLE_SUFFIX BETWEEN '${dataform.projectConfig.vars.raw_start_date}'
-                           AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+    AND _TABLE_SUFFIX BETWEEN '20240101' AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
   GROUP BY session_id, page_url
 ),
 
@@ -79,8 +78,11 @@ with_windows AS (
     p.*,
     ROW_NUMBER() OVER (PARTITION BY p.session_id ORDER BY p.pageview_time) AS pageview_number,
     LEAD(p.page_url) OVER (PARTITION BY p.session_id ORDER BY p.pageview_time) AS next_page_url,
-    LAST_VALUE(p.page_url) OVER (PARTITION BY p.session_id ORDER BY p.pageview_time
-         ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS exit_page_url
+    LAST_VALUE(p.page_url) OVER (
+      PARTITION BY p.session_id
+      ORDER BY p.pageview_time
+      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS exit_page_url
   FROM url_parts p
 )
 
@@ -94,7 +96,7 @@ SELECT
   w.page_category,
   COALESCE(ad.author_name, 'hotspawn') AS author_name,
   COALESCE(scr.max_scroll_percentage, 10) AS max_scroll_percentage,
-  COALESCE(ts.max_time_on_page, 15)       AS max_time_on_page,
+  COALESCE(ts.max_time_on_page, 15) AS max_time_on_page,
   w.pageview_number,
   w.next_page_url,
   ut.user_type,
@@ -102,7 +104,7 @@ SELECT
   IF(w.pageview_number = MAX(w.pageview_number) OVER (PARTITION BY w.session_id), 1, 0) AS isExitPage,
   w.exit_page_url
 FROM with_windows w
-LEFT JOIN article_data  ad ON w.page_url = ad.page_url AND w.user_pseudo_id = ad.user_pseudo_id
-LEFT JOIN scr_data     scr ON w.session_id = scr.session_id AND w.page_url = scr.page_url
-LEFT JOIN time_spent_data ts ON w.session_id = ts.session_id AND w.page_url = ts.page_url
-LEFT JOIN user_type ut USING (user_pseudo_id)
+LEFT JOIN article_data     ad ON w.page_url = ad.page_url AND w.user_pseudo_id = ad.user_pseudo_id
+LEFT JOIN scr_data        scr ON w.session_id = scr.session_id AND w.page_url = scr.page_url
+LEFT JOIN time_spent_data ts  ON w.session_id = ts.session_id  AND w.page_url = ts.page_url
+LEFT JOIN user_type       ut  USING (user_pseudo_id)
