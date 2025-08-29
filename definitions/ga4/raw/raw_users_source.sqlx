@@ -1,25 +1,41 @@
-config { type: "view", schema: dataform.projectConfig.vars.schema, tags: ["ga4","raw","user"] }
+config {
+  type: "view",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4","raw","users"]
+}
 
 SELECT
-  _TABLE_SUFFIX AS tbl_suffix,
-  TIMESTAMP_MICROS(event_timestamp) AS event_ts,
-  DATE(TIMESTAMP_MICROS(event_timestamp), "Europe/Bratislava") AS event_date,
+  TIMESTAMP_MICROS(event_timestamp)                                   AS event_ts,
+  DATE(TIMESTAMP_MICROS(event_timestamp))                              AS event_date,
   user_pseudo_id,
-  user_id AS event_user_id,
-  (SELECT up.value.string_value FROM UNNEST(user_properties) up WHERE up.key = 'user_id') AS userprop_user_id,
-  (SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'ga_session_id') AS ga_session_id,
-  traffic_source.source AS ts_source,
-  traffic_source.medium AS ts_medium,
-  traffic_source.name   AS ts_campaign,
-  geo.country             AS geo_country,
-  device.category         AS device_category,
-  device.operating_system AS device_operating_system,
-  device.mobile_brand_name,
-  device.mobile_model_name,
+  user_id                                                              AS event_user_id,
+  (SELECT up.value.string_value FROM UNNEST(user_properties) up
+     WHERE up.key = 'user_id')                                         AS userprop_user_id,
+
+  -- session key
+  (SELECT ep.value.int_value FROM UNNEST(event_params) ep
+     WHERE ep.key = 'ga_session_id')                                   AS ga_session_id,
+
+  -- GA4 first-touch (traffic_source)
+  traffic_source.source                                                AS ts_source,
+  traffic_source.medium                                                AS ts_medium,
+  traffic_source.name                                                  AS ts_campaign,
+
+  -- “session UTMs” (usually appear on session_start)
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep
+     WHERE ep.key = 'source')                                          AS session_source,
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep
+     WHERE ep.key = 'medium')                                          AS session_medium,
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep
+     WHERE ep.key = 'campaign')                                        AS session_campaign,
+
+  geo.country                                                          AS geo_country,
+  device.category                                                      AS device_category,
   platform,
-  (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'site_name') AS site_name,
+
+  (SELECT ep.value.string_value FROM UNNEST(event_params) ep
+     WHERE ep.key = 'site_name')                                       AS site_name,
+
   event_name
-FROM `hotspawn-440312.analytics_457395054.events_*`
-WHERE _TABLE_SUFFIX BETWEEN '20240101'
-  AND FORMAT_DATE('%Y%m%d', CURRENT_DATE("Europe/Bratislava"))
-  AND user_pseudo_id IS NOT NULL
+FROM `${dataform.projectConfig.vars.ga4_dataset}.events_*`
+WHERE _TABLE_SUFFIX BETWEEN '20200101' AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())

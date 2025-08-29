@@ -8,126 +8,75 @@ config {
   }
 }
 
-/* Use ONLY columns present in raw_sessions_source */
 WITH base AS (
-  SELECT
-    user_pseudo_id,
-    ga_session_id,
-    event_ts,                   -- TIMESTAMP in raw view
-    event_date,                 -- DATE in raw view
-    event_name,
-    site_name,
-    ts_source, ts_medium, ts_campaign,
-    session_source, session_medium, session_campaign,
-    geo_country, device_category, platform
-  FROM ${ref("raw_sessions_source")}
+  SELECT * FROM ${ref("raw_sessions_source")}
 ),
 
-/* Session start/end + earliest non-null session-level UTM and site_name */
-sess_rollup AS (
+per_session AS (
   SELECT
     user_pseudo_id,
     ga_session_id,
 
-    MIN(event_ts)  AS session_start_ts,
-    MIN(event_date) AS date,
+    MIN(event_ts) AS session_start_ts,
+    MAX(event_ts) AS session_end_ts,
 
-    /* earliest non-null */
+    -- First non-null within the session
     ARRAY_AGG(site_name       IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS site_name,
+    ARRAY_AGG(session_source  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS session_source,
+    ARRAY_AGG(session_medium  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS session_medium,
+    ARRAY_AGG(session_campaign IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS session_campaign,
 
-    /* prefer explicit session_* params, else traffic_source first touch */
-    COALESCE(
-      ARRAY_AGG(session_source  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)],
-      ARRAY_AGG(ts_source       IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)]
-    ) AS session_source,
+    -- Last known device/geo/platform in the session
+    ARRAY_AGG(geo_country     IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS geo_country,
+    ARRAY_AGG(device_category IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS device_category,
+    ARRAY_AGG(platform        IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS platform,
 
-    COALESCE(
-      ARRAY_AGG(session_medium  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)],
-      ARRAY_AGG(ts_medium       IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)]
-    ) AS session_medium,
-
-    COALESCE(
-      ARRAY_AGG(session_campaign IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)],
-      ARRAY_AGG(ts_campaign      IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)]
-    ) AS session_campaign
-
+    -- Counts
+    COUNTIF(event_name = 'page_view')           AS page_views,
+    COUNTIF(event_name = 'user_engagement') > 0 AS has_engagement
   FROM base
   GROUP BY user_pseudo_id, ga_session_id
 ),
 
-/* last known geo/device/platform snapshot inside the session */
-geo_device AS (
+with_user AS (
   SELECT
-    user_pseudo_id,
-    ga_session_id,
-    ARRAY_AGG(geo_country     IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS country,
-    ARRAY_AGG(device_category IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS device,
-    ARRAY_AGG(platform        IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS platform
-  FROM base
-  GROUP BY user_pseudo_id, ga_session_id
-),
-
-/* Pageview metrics per session from int_pageviews */
-pv AS (
-  SELECT
-    user_pseudo_id,
-    SPLIT(session_id, "-")[OFFSET(1)] AS ga_session_id_str,   -- string
-    COUNT(*) AS page_views
-  FROM ${ref("int_pageviews")}
-  GROUP BY 1,2
-),
-
-/* Engagement and sign-ups per session (boolean -> int) */
-flags AS (
-  SELECT
-    user_pseudo_id,
-    ga_session_id,
-    /* simple GA4 engaged_session proxy: presence of user_engagement */
-    IF( COUNTIF(event_name = 'user_engagement') > 0, 1, 0 ) AS engaged_session,
-    IF( COUNTIF(event_name IN ('sign_up','user_signup')) > 0, 1, 0 ) AS user_signup
-  FROM base
-  GROUP BY user_pseudo_id, ga_session_id
+    s.*,
+    u.first_seen,
+    u.signup_occurred
+  FROM per_session s
+  LEFT JOIN ${ref("int_users")} u USING (user_pseudo_id)
 )
 
-/* Final */
 SELECT
-  r.date,
-  COALESCE(r.site_name, 'hotspawn')                    AS site_name,
-  TIME(r.session_start_ts)                             AS session_time,
-  r.user_pseudo_id                                     AS pseud_id,
-  CONCAT(r.user_pseudo_id, "-", CAST(r.ga_session_id AS STRING)) AS session_id,
+  DATE(session_start_ts)                                               AS date,
+  COALESCE(site_name, 'hotspawn')                                      AS site_name,
+  TIME(session_start_ts)                                               AS session_time,
+  user_pseudo_id                                                       AS pseud_id,
+  CONCAT(user_pseudo_id, '-', CAST(ga_session_id AS STRING))           AS session_id,
+  geo_country                                                          AS country,
+  device_category                                                      AS device,
+  platform,
 
-  gd.country,
-  gd.device,
-  gd.platform,
+  CASE WHEN DATE(session_start_ts) = first_seen THEN 'New User' ELSE 'Returning User' END AS user_type,
 
-  u.user_type,
-
-  /* very light channel grouping illustration */
+  -- simple channel grouping
   CASE
-    WHEN LOWER(COALESCE(r.session_medium,'')) IN ('cpc','ppc','paidsearch','paid') THEN 'Paid Search'
-    WHEN LOWER(COALESCE(r.session_medium,'')) IN ('email')                           THEN 'Email'
-    WHEN LOWER(COALESCE(r.session_medium,'')) IN ('social','social-network','sm')    THEN 'Social'
-    WHEN LOWER(COALESCE(r.session_source,'')) IN ('direct','(direct)') OR r.session_source IS NULL THEN 'Direct'
-    ELSE 'Referral / Other'
+    WHEN session_medium IS NULL OR session_medium IN ('(not set)','(none)') THEN 'Direct'
+    WHEN LOWER(session_medium) IN ('cpc','ppc','paidsearch','sem')            THEN 'Paid Search'
+    WHEN LOWER(session_medium) LIKE '%social%' OR LOWER(session_source) IN ('facebook','instagram','twitter','tiktok','linkedin') THEN 'Social'
+    WHEN LOWER(session_medium) IN ('email')                                   THEN 'Email'
+    WHEN LOWER(session_medium) IN ('affiliate')                               THEN 'Affiliate'
+    WHEN LOWER(session_medium) IN ('referral')                                THEN 'Referral'
+    WHEN LOWER(session_medium) IN ('display','cpm')                           THEN 'Display'
+    ELSE 'Other'
   END AS channel_grouping,
 
-  r.session_source,
-  r.session_medium,
-  r.session_campaign,
+  session_source,
+  session_medium,
+  session_campaign,
 
-  /* bounce = single pageview session */
-  IF(COALESCE(p.page_views,0) = 1, 1, 0)              AS bounces,
-  COALESCE(p.page_views,0)                            AS page_view,
-
-  COALESCE(f.user_signup,0)                           AS user_signup,
-  COALESCE(f.engaged_session,0)                       AS engaged_session
-
-FROM sess_rollup r
-LEFT JOIN geo_device gd
-  ON gd.user_pseudo_id = r.user_pseudo_id AND gd.ga_session_id = r.ga_session_id
-LEFT JOIN pv p
-  ON p.user_pseudo_id = r.user_pseudo_id AND CAST(p.ga_session_id_str AS INT64) = r.ga_session_id
-LEFT JOIN flags f
-  ON f.user_pseudo_id = r.user_pseudo_id AND f.ga_session_id = r.ga_session_id
-LEFT JOIN ${ref("int_users")} u USING (user_pseudo_id)
+  IF(page_views = 1 AND NOT has_engagement, 1, 0)                     AS bounces,
+  IF(has_engagement, 1, 0)                                            AS engaged_session,
+  page_views                                                          AS page_view,
+  IF(signup_occurred, 1, 0)                                           AS user_signup
+FROM with_user

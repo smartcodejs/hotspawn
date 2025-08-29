@@ -3,105 +3,133 @@ config {
   schema: dataform.projectConfig.vars.schema,
   tags: ["ga4","intermediate","pageviews"],
   bigquery: {
-    partitionBy: "DATE(event_ts)",
-    clusterBy: ["user_pseudo_id","ga_session_id"]
+    partitionBy: "session_date",
+    clusterBy: ["user_pseudo_id","session_id"]
   }
 }
 
-/* Use ONLY columns that exist in raw_page_source */
-WITH base AS (
+/* Base page views from the raw view */
+WITH pv AS (
   SELECT
+    event_ts,
+    event_date                                         AS session_date,
     user_pseudo_id,
     ga_session_id,
-    event_ts,
-    event_date,
     page_url,
-    page_title,
-    author_name,            -- may be NULL on non-article events
-    scroll_pct,             -- INT, only present on scroll events
-    time_spent_sec,         -- INT, only present on time_on_page events
-    event_name
+    page_title
   FROM ${ref("raw_page_source")}
 ),
 
-/* Keep only real page views (ordering anchor for RN/LEAD) */
-pv AS (
-  SELECT *
-  FROM base
-  WHERE event_name = 'page_view'
+/* Optional: author from any custom “article_view” events (safe if missing) */
+article AS (
+  SELECT
+    user_pseudo_id,
+    (SELECT ep.value.string_value FROM UNNEST(event_params) ep
+       WHERE ep.key = 'page_location')                AS page_url,
+    COALESCE(
+      NULLIF((SELECT ep.value.string_value FROM UNNEST(event_params) ep
+                WHERE ep.key = 'author_name'), ''),
+      'hotspawn'
+    ) AS author_name
+  FROM `${dataform.projectConfig.vars.ga4_dataset}.events_*`
+  WHERE event_name = 'article_view'
 ),
 
-/* Aggregate per (session_id, page_url) */
-scroll AS (
+/* Max percent scrolled, if present (works with 'scroll' or custom 'scroll_depth') */
+scr AS (
   SELECT
-    CONCAT(user_pseudo_id, "-", CAST(ga_session_id AS STRING)) AS session_id,
-    page_url,
-    MAX(scroll_pct) AS max_scroll_percentage
-  FROM base
-  WHERE scroll_pct IS NOT NULL
-  GROUP BY 1,2
-),
-time_on_page AS (
-  SELECT
-    CONCAT(user_pseudo_id, "-", CAST(ga_session_id AS STRING)) AS session_id,
-    page_url,
-    MAX(time_spent_sec) AS max_time_on_page
-  FROM base
-  WHERE time_spent_sec IS NOT NULL
-  GROUP BY 1,2
+    user_pseudo_id,
+    (SELECT ep.value.int_value FROM UNNEST(event_params) ep
+       WHERE ep.key = 'ga_session_id')                AS ga_session_id,
+    (SELECT ep.value.string_value FROM UNNEST(event_params) ep
+       WHERE ep.key = 'page_location')                AS page_url,
+    MAX( COALESCE(
+          (SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'scroll_percentage'),
+          (SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'percent_scrolled')
+        ) )                                           AS max_scroll_percentage
+  FROM `${dataform.projectConfig.vars.ga4_dataset}.events_*`
+  WHERE event_name IN ('scroll','scroll_depth')
+  GROUP BY user_pseudo_id, ga_session_id, page_url
 ),
 
-/* One author per (session,page). If you only store author at article_view rows,
-   this will still safely return NULL when absent. */
-authors AS (
+/* Time on page – use GA4 engaged_time_msec if “time_on_page” doesn’t exist */
+time_spent AS (
   SELECT
-    CONCAT(user_pseudo_id, "-", CAST(ga_session_id AS STRING)) AS session_id,
-    page_url,
-    ANY_VALUE(author_name IGNORE NULLS) AS author_name
-  FROM base
-  WHERE author_name IS NOT NULL
-  GROUP BY 1,2
+    user_pseudo_id,
+    (SELECT ep.value.int_value FROM UNNEST(event_params) ep
+       WHERE ep.key = 'ga_session_id')                AS ga_session_id,
+    (SELECT ep.value.string_value FROM UNNEST(event_params) ep
+       WHERE ep.key = 'page_location')                AS page_url,
+    MAX( COALESCE(
+          SAFE_CAST(REGEXP_EXTRACT(
+            (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'time_spent'),
+            r'^(\d+)') AS INT64),
+          (SELECT ep.value.int_value FROM UNNEST(event_params) ep
+             WHERE ep.key = 'engaged_time_msec')/1000
+        ) )                                           AS max_time_on_page
+  FROM `${dataform.projectConfig.vars.ga4_dataset}.events_*`
+  WHERE event_name IN ('time_on_page','user_engagement')
+  GROUP BY user_pseudo_id, ga_session_id, page_url
+),
+
+with_windows AS (
+  SELECT
+    pv.session_date,
+    pv.user_pseudo_id,
+    CONCAT(pv.user_pseudo_id,'-',CAST(pv.ga_session_id AS STRING))    AS session_id,
+    pv.page_url,
+    pv.page_title,
+
+    -- path parsing with safe defaults
+    COALESCE(REGEXP_EXTRACT(pv.page_url, r'^https?://[^/]+/([^/?#]+)'), 'hotspawn')                       AS theme_category,
+    COALESCE(REGEXP_EXTRACT(pv.page_url, r'^https?://[^/]+/[^/?#]+/([^/?#]+)'), 'hotspawn')               AS page_category,
+
+    COALESCE(a.author_name, 'hotspawn')                                                                     AS author_name,
+    COALESCE(scr.max_scroll_percentage, 10)                                                                 AS max_scroll_percentage,
+    COALESCE(ts.max_time_on_page, 15)                                                                       AS max_time_on_page,
+
+    ROW_NUMBER() OVER (PARTITION BY pv.user_pseudo_id, pv.ga_session_id ORDER BY pv.event_ts)               AS pageview_number,
+    LEAD(pv.page_url) OVER (PARTITION BY pv.user_pseudo_id, pv.ga_session_id ORDER BY pv.event_ts)          AS next_page_url
+  FROM pv
+  LEFT JOIN article  a  ON pv.page_url = a.page_url AND pv.user_pseudo_id = a.user_pseudo_id
+  LEFT JOIN scr      scr ON pv.user_pseudo_id = scr.user_pseudo_id
+                        AND pv.ga_session_id = scr.ga_session_id
+                        AND pv.page_url      = scr.page_url
+  LEFT JOIN time_spent ts ON pv.user_pseudo_id = ts.user_pseudo_id
+                        AND pv.ga_session_id = ts.ga_session_id
+                        AND pv.page_url      = ts.page_url
+),
+
+add_user_type AS (
+  SELECT
+    w.*,
+    CASE
+      WHEN w.session_date = u.first_seen THEN 'New User' ELSE 'Returning User'
+    END AS user_type
+  FROM with_windows w
+  LEFT JOIN ${ref("int_users")} u USING (user_pseudo_id)
 )
 
 SELECT
-  DATE(pv.event_ts) AS session_date,
-  pv.user_pseudo_id,
-  CONCAT(pv.user_pseudo_id, "-", CAST(pv.ga_session_id AS STRING)) AS session_id,
-  pv.page_url,
-  pv.page_title,
+  session_date,
+  user_pseudo_id,
+  session_id,
+  page_url,
+  page_title,
+  theme_category,
+  page_category,
+  author_name,
+  max_scroll_percentage,
+  max_time_on_page,
+  pageview_number,
+  next_page_url,
+  user_type,
+  IF(pageview_number = 1, 1, 0) AS isLandingPage,
+  IF(LEAD(pageview_number) OVER (PARTITION BY user_pseudo_id, session_id ORDER BY pageview_number) IS NULL, 1, 0) AS isExitPage,
 
-  /* theme/page categories parsed from URL path (robust defaults) */
-  COALESCE(
-    NULLIF(SPLIT(REGEXP_EXTRACT(pv.page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(0)], ''),
-    'hotspawn'
-  ) AS theme_category,
-  COALESCE(
-    NULLIF(SPLIT(REGEXP_EXTRACT(pv.page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(1)], ''),
-    'hotspawn'
-  ) AS page_category,
-
-  COALESCE(a.author_name, 'hotspawn')                               AS author_name,
-  COALESCE(s.max_scroll_percentage, 10)                             AS max_scroll_percentage,
-  COALESCE(t.max_time_on_page, 15)                                  AS max_time_on_page,
-
-  ROW_NUMBER() OVER (PARTITION BY pv.user_pseudo_id, pv.ga_session_id ORDER BY pv.event_ts) AS pageview_number,
-  LEAD(pv.page_url) OVER (PARTITION BY pv.user_pseudo_id, pv.ga_session_id ORDER BY pv.event_ts) AS next_page_url,
-
-  /* User type from the users model */
-  u.user_type,
-
-  CASE WHEN ROW_NUMBER() OVER (PARTITION BY pv.user_pseudo_id, pv.ga_session_id ORDER BY pv.event_ts) = 1 THEN 1 ELSE 0 END AS isLandingPage,
-  CASE WHEN ROW_NUMBER() OVER (PARTITION BY pv.user_pseudo_id, pv.ga_session_id ORDER BY pv.event_ts DESC) = 1 THEN 1 ELSE 0 END AS isExitPage,
-
-  LAST_VALUE(pv.page_url) OVER (
-    PARTITION BY pv.user_pseudo_id, pv.ga_session_id
-    ORDER BY pv.event_ts
+  LAST_VALUE(page_url) OVER (
+    PARTITION BY user_pseudo_id, session_id
+    ORDER BY pageview_number
     ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
   ) AS exit_page_url
-
-FROM pv
-LEFT JOIN scroll        s ON s.session_id = CONCAT(pv.user_pseudo_id, "-", CAST(pv.ga_session_id AS STRING))
-                         AND s.page_url   = pv.page_url
-LEFT JOIN time_on_page  t ON t.session_id = CONCAT(pv.user_pseudo_id, "-", CAST(pv.ga_session_id AS STRING))
-                         AND t.page_url   = pv.page_url
-LEFT JOIN ${ref("int_users")} u USING (user_pseudo_id)
+FROM add_user_type

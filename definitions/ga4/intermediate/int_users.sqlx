@@ -1,130 +1,88 @@
 config {
   type: "table",
   schema: dataform.projectConfig.vars.schema,
-  tags: ["ga4", "intermediate", "users"]
+  tags: ["ga4","intermediate","users"],
+  bigquery: { partitionBy: "DATE(first_seen)" }
 }
 
--- 0) Base from the prepared raw view (already has event_ts and event_date)
-with base as (
-  select
-    user_pseudo_id,
-    event_ts,                    -- TIMESTAMP
-    event_date,                  -- DATE
-    event_name,
+/* Base from raw users view */
+WITH base AS (
+  SELECT
+    user_pseudo_id, event_ts, event_date, event_name,
     ga_session_id,
-
-    -- traffic_source.* exposed by raw_users_source
-    ts_source,
-    ts_medium,
-    ts_campaign,
-
-    site_name,
-    geo_country,
-    device_category,
-    device_operating_system,
-    mobile_brand_name,
-    mobile_model_name,
-    platform,
-
-    event_user_id,
-    userprop_user_id
-  from ${ref("raw_users_source")}
+    ts_source, ts_medium, ts_campaign,
+    session_source, session_medium, session_campaign,
+    geo_country, device_category, platform, site_name,
+    event_user_id, userprop_user_id
+  FROM ${ref("raw_users_source")}
 ),
 
--- 1) Canonical session key for counting sessions
-sessions as (
-  select
+user_id_latest AS (
+  SELECT
     user_pseudo_id,
-    if(
-      ga_session_id is null, null,
-      concat(cast(user_pseudo_id as string), "-", cast(ga_session_id as string))
-    ) as session_key,
-    site_name,
-    event_name,
-    event_ts,
-    event_date
-  from base
+    COALESCE(
+      ARRAY_AGG(event_user_id    IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)],
+      ARRAY_AGG(userprop_user_id IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)]
+    ) AS user_id
+  FROM base
+  GROUP BY user_pseudo_id
 ),
 
--- 2) Latest stitched user_id (from top-level or user_property)
-user_id_latest as (
-  select
+first_from_ts AS (
+  SELECT
     user_pseudo_id,
-    coalesce(
-      array_agg(event_user_id    ignore nulls order by event_ts desc)[safe_offset(0)],
-      array_agg(userprop_user_id ignore nulls order by event_ts desc)[safe_offset(0)]
-    ) as user_id
-  from base
-  group by user_pseudo_id
+    ARRAY_AGG(ts_source   IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_ts_source,
+    ARRAY_AGG(ts_medium   IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_ts_medium,
+    ARRAY_AGG(ts_campaign IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_ts_campaign
+  FROM base
+  GROUP BY user_pseudo_id
 ),
 
--- 3) FIRST device / geo / platform snapshot
-first_device_geo as (
-  select
+first_from_session AS (
+  SELECT
     user_pseudo_id,
-    array_agg(device_category         ignore nulls order by event_ts asc)[safe_offset(0)] as first_device_category,
-    array_agg(device_operating_system ignore nulls order by event_ts asc)[safe_offset(0)] as first_device_operating_system,
-    array_agg(mobile_brand_name       ignore nulls order by event_ts asc)[safe_offset(0)] as first_mobile_brand_name,
-    array_agg(mobile_model_name       ignore nulls order by event_ts asc)[safe_offset(0)] as first_mobile_model_name,
-    array_agg(platform                ignore nulls order by event_ts asc)[safe_offset(0)] as first_platform,
-    array_agg(geo_country             ignore nulls order by event_ts asc)[safe_offset(0)] as first_geo_country
-  from base
-  group by user_pseudo_id
+    ARRAY_AGG(session_source  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_sess_source,
+    ARRAY_AGG(session_medium  IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_sess_medium,
+    ARRAY_AGG(session_campaign IGNORE NULLS ORDER BY event_ts ASC)[SAFE_OFFSET(0)] AS first_sess_campaign
+  FROM base
+  WHERE event_name = 'session_start'
+  GROUP BY user_pseudo_id
 ),
 
--- 4) FIRST-touch UTM from traffic_source.*
-first_from_ts as (
-  select
+last_geo_device AS (
+  SELECT
     user_pseudo_id,
-    array_agg(ts_source   ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_source,
-    array_agg(ts_medium   ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_medium,
-    array_agg(ts_campaign ignore nulls order by event_ts asc)[safe_offset(0)] as first_utm_campaign
-  from base
-  group by user_pseudo_id
+    ARRAY_AGG(geo_country     IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS last_geo_country,
+    ARRAY_AGG(device_category IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS last_device_category,
+    ARRAY_AGG(platform        IGNORE NULLS ORDER BY event_ts DESC)[SAFE_OFFSET(0)] AS last_platform
+  FROM base
+  GROUP BY user_pseudo_id
 ),
 
--- 5) Rollup per user
-user_rollup as (
-  select
+user_rollup AS (
+  SELECT
     user_pseudo_id,
-    min(event_date) as first_seen,
-    min(event_ts)   as first_seen_ts,
-    count(distinct session_key)                                        as sessions_by_key,
-    count(distinct if(site_name = 'Microsite', session_key, null))     as microsite_sessions,
-    array_agg(
-      if(event_name in ('sign_up','user_signup'), event_ts, null)
-      ignore nulls order by event_ts asc
-    )[safe_offset(0)]                                                  as signup_timestamp,
-    count(*)                                                           as event_rows
-  from sessions
-  group by user_pseudo_id
+    MIN(event_date) AS first_seen,
+    COUNT(DISTINCT IF(event_name = 'session_start', ga_session_id, NULL)) AS total_sessions,
+    LOGICAL_OR(event_name IN ('sign_up','user_signup')) AS signup_occurred
+  FROM base
+  GROUP BY user_pseudo_id
 )
 
--- 6) Final user table
-select
+SELECT
   r.user_pseudo_id,
   uid.user_id,
   r.first_seen,
-  case when r.sessions_by_key > 0 then r.sessions_by_key
-       when r.event_rows      > 0 then 1
-       else 0 end                                                    as total_sessions,
-  if(r.signup_timestamp is null, 0, 1)                               as signup_occurred,
-  r.signup_timestamp,
-  date(r.signup_timestamp)                                           as signup_date,
-
-  fts.first_utm_source,
-  fts.first_utm_medium,
-  fts.first_utm_campaign,
-
-  r.microsite_sessions,
-
-  fdg.first_geo_country,
-  fdg.first_device_category,
-  fdg.first_device_operating_system,
-  fdg.first_mobile_brand_name,
-  fdg.first_mobile_model_name,
-  fdg.first_platform
-from user_rollup r
-left join user_id_latest   uid using (user_pseudo_id)
-left join first_from_ts    fts using (user_pseudo_id)
-left join first_device_geo fdg using (user_pseudo_id)
+  r.total_sessions,
+  r.signup_occurred,
+  COALESCE(ts.first_ts_source,   sess.first_sess_source)   AS first_utm_source,
+  COALESCE(ts.first_ts_medium,   sess.first_sess_medium)   AS first_utm_medium,
+  COALESCE(ts.first_ts_campaign, sess.first_sess_campaign) AS first_utm_campaign,
+  lgd.last_geo_country,
+  lgd.last_device_category,
+  lgd.last_platform
+FROM user_rollup r
+LEFT JOIN user_id_latest      uid  USING (user_pseudo_id)
+LEFT JOIN first_from_ts       ts   USING (user_pseudo_id)
+LEFT JOIN first_from_session  sess USING (user_pseudo_id)
+LEFT JOIN last_geo_device     lgd  USING (user_pseudo_id)

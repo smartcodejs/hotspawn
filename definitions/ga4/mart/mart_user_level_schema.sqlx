@@ -1,2 +1,20 @@
-config { type: "view", schema: dataform.projectConfig.vars.schema, tags: ["ga4","mart","user"] }
-SELECT * FROM ${ref("int_users")}
+config {
+  type: "table",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4","mart","users"],
+  bigquery: { partitionBy: "DATE(first_seen)" }
+}
+
+SELECT
+  user_pseudo_id,
+  user_id,
+  first_seen,
+  total_sessions,
+  signup_occurred,
+  first_utm_source,
+  first_utm_medium,
+  first_utm_campaign,
+  last_geo_country,
+  last_device_category,
+  last_platform
+FROM ${ref("int_users")}
