@@ -1,0 +1,15 @@
+config {
+  type: "assertion",
+  tags: ["dq", "mart", "sessions"]
+}
+
+/*
+  This assertion FAILS if any rows are returned.
+  We flag all session rows where page_view = 0 (or is missing, if you want).
+*/
+
+select *
+from ${ref("mart_session_level_schema")}
+where page_view = 0
+-- If you also want to catch missing values uncomment the next line:
+--    or page_view is null
