@@ -3,10 +3,12 @@ config {
   schema: dataform.projectConfig.vars.schema,
   tags: ["ga4","intermediate","sessions"],
   bigquery: {
-    partitionBy: "DATE(session_start_ts)",
+    partitionBy: "date",
     clusterBy: ["user_pseudo_id","ga_session_id"]
   }
 }
+
+
 
 WITH base AS (
   SELECT *

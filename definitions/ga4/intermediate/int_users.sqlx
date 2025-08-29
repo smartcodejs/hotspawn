@@ -3,7 +3,7 @@ config {
   schema: dataform.projectConfig.vars.schema,
   tags: ["ga4","intermediate","users"],
   bigquery: {
-    partitionBy: "DATE(first_seen)",
+    partitionBy: "first_seen",
     clusterBy: ["user_pseudo_id"]
   }
 }
