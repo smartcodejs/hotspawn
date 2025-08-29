@@ -35,6 +35,6 @@ SELECT
   (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'site_name')     AS site_name,
 
   event_name
-FROM `hotspawn-440312.analytics_457395854.events_*`
+FROM `hotspawn-440312.analytics_457395054.events_*`
 WHERE _TABLE_SUFFIX BETWEEN '20240101'
   AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
