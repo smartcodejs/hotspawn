@@ -1,5 +1,5 @@
 warehouse: bigquery
 defaultDatabase: hotspawn-440312
-defaultSchema: ga4_staging
+defaultSchema: ga4_neutral
 defaultLocation: EU
 
