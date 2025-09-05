@@ -1,6 +1,6 @@
 config {
   type: "table",
-  schema: "ga4_staging",
+  schema: dataform.projectConfig.vars.schema,
   tags: ["ga4","intermediate","users"],
   bigquery: { partitionBy: "first_seen", clusterBy: ["user_pseudo_id"] }
 }
