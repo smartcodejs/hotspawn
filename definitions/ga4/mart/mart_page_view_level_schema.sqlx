@@ -1,8 +1,9 @@
 config {
-  type: "table",
+  type: "incremental",
   schema: dataform.projectConfig.vars.schema,
   tags: ["ga4","mart","pageviews"],
-  bigquery: { partitionBy: "session_date", clusterBy: ["user_pseudo_id","session_id"] }
+  bigquery: { partitionBy: "session_date", clusterBy: ["user_pseudo_id","session_id"] },
+  uniqueKey: ["session_id","pageview_number"]
 }
 
 SELECT
@@ -22,3 +23,8 @@ SELECT
   isExitPage,
   exit_page_url
 FROM ${ref("int_pageviews")}
+${when(incremental(), `
+  WHERE session_date BETWEEN DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+                                      INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY)
+                        AND CURRENT_DATE('${dataform.projectConfig.vars.tz}')
+`)}
