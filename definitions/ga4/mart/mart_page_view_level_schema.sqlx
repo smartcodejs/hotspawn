@@ -18,7 +18,6 @@ SELECT
   max_time_on_page,
   pageview_number,
   next_page_url,
-  user_type,
   isLandingPage,
   isExitPage,
   exit_page_url
