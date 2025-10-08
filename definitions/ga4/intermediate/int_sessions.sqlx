@@ -15,29 +15,97 @@ WITH base AS (
                        AND CURRENT_DATE('${dataform.projectConfig.vars.tz}')
   `)}
 ),
+
+/* ------- pick earliest non-null UTM fields per session (no arrays, no postfix) ------- */
+utm_source AS (
+  SELECT user_pseudo_id, ga_session_id, session_source
+  FROM (
+    SELECT user_pseudo_id, ga_session_id, session_source,
+           ROW_NUMBER() OVER (
+             PARTITION BY user_pseudo_id, ga_session_id
+             ORDER BY (session_source IS NULL), event_ts ASC
+           ) AS rn
+    FROM base
+  ) WHERE rn = 1
+),
+utm_medium AS (
+  SELECT user_pseudo_id, ga_session_id, session_medium
+  FROM (
+    SELECT user_pseudo_id, ga_session_id, session_medium,
+           ROW_NUMBER() OVER (
+             PARTITION BY user_pseudo_id, ga_session_id
+             ORDER BY (session_medium IS NULL), event_ts ASC
+           ) AS rn
+    FROM base
+  ) WHERE rn = 1
+),
+utm_campaign AS (
+  SELECT user_pseudo_id, ga_session_id, session_campaign
+  FROM (
+    SELECT user_pseudo_id, ga_session_id, session_campaign,
+           ROW_NUMBER() OVER (
+             PARTITION BY user_pseudo_id, ga_session_id
+             ORDER BY (session_campaign IS NULL), event_ts ASC
+           ) AS rn
+    FROM base
+  ) WHERE rn = 1
+),
+utm_site AS (
+  SELECT user_pseudo_id, ga_session_id, site_name
+  FROM (
+    SELECT user_pseudo_id, ga_session_id, site_name,
+           ROW_NUMBER() OVER (
+             PARTITION BY user_pseudo_id, ga_session_id
+             ORDER BY (site_name IS NULL), event_ts ASC
+           ) AS rn
+    FROM base
+  ) WHERE rn = 1
+),
 utm AS (
   SELECT
-    user_pseudo_id,
-    ga_session_id,
-    -- earliest occurrence within the session (no arrays)
-    ANY_VALUE(session_source)  KEEP (DENSE_RANK FIRST ORDER BY event_ts) AS session_source,
-    ANY_VALUE(session_medium)  KEEP (DENSE_RANK FIRST ORDER BY event_ts) AS session_medium,
-    ANY_VALUE(session_campaign)KEEP (DENSE_RANK FIRST ORDER BY event_ts) AS session_campaign,
-    ANY_VALUE(site_name)       KEEP (DENSE_RANK FIRST ORDER BY event_ts) AS site_name
-  FROM base
-  GROUP BY 1,2
+    s.user_pseudo_id, s.ga_session_id,
+    s.session_source, m.session_medium, c.session_campaign, si.site_name
+  FROM utm_source s
+  LEFT JOIN utm_medium   m  USING (user_pseudo_id, ga_session_id)
+  LEFT JOIN utm_campaign c  USING (user_pseudo_id, ga_session_id)
+  LEFT JOIN utm_site     si USING (user_pseudo_id, ga_session_id)
 ),
-geo_device AS (
-  SELECT
-    user_pseudo_id,
-    ga_session_id,
-    -- latest snapshot within the session
-    ANY_VALUE(geo_country)     KEEP (DENSE_RANK LAST ORDER BY event_ts) AS country,
-    ANY_VALUE(device_category) KEEP (DENSE_RANK LAST ORDER BY event_ts) AS device,
-    ANY_VALUE(platform)        KEEP (DENSE_RANK LAST ORDER BY event_ts) AS platform
-  FROM base
-  GROUP BY 1,2
+
+/* ------- latest country/device/platform per session ------- */
+geo_country_last AS (
+  SELECT user_pseudo_id, ga_session_id, geo_country AS country
+  FROM (
+    SELECT user_pseudo_id, ga_session_id, geo_country,
+           ROW_NUMBER() OVER (
+             PARTITION BY user_pseudo_id, ga_session_id
+             ORDER BY (geo_country IS NULL), event_ts DESC
+           ) AS rn
+    FROM base
+  ) WHERE rn = 1
 ),
+device_last AS (
+  SELECT user_pseudo_id, ga_session_id, device_category AS device
+  FROM (
+    SELECT user_pseudo_id, ga_session_id, device_category,
+           ROW_NUMBER() OVER (
+             PARTITION BY user_pseudo_id, ga_session_id
+             ORDER BY (device_category IS NULL), event_ts DESC
+           ) AS rn
+    FROM base
+  ) WHERE rn = 1
+),
+platform_last AS (
+  SELECT user_pseudo_id, ga_session_id, platform
+  FROM (
+    SELECT user_pseudo_id, ga_session_id, platform,
+           ROW_NUMBER() OVER (
+             PARTITION BY user_pseudo_id, ga_session_id
+             ORDER BY (platform IS NULL), event_ts DESC
+           ) AS rn
+    FROM base
+  ) WHERE rn = 1
+),
+
 session_bounds AS (
   SELECT
     user_pseudo_id,
@@ -47,6 +115,7 @@ session_bounds AS (
   FROM base
   GROUP BY 1,2
 ),
+
 metrics AS (
   SELECT
     user_pseudo_id,
@@ -66,9 +135,9 @@ SELECT
   TIME(sb.session_start_ts) AS session_time,
   sb.user_pseudo_id         AS pseud_id,
   CONCAT(sb.user_pseudo_id, '-', CAST(sb.ga_session_id AS STRING)) AS session_id,
-  gd.country,
-  gd.device,
-  gd.platform,
+  gc.country,
+  dv.device,
+  pf.platform,
   m.user_type,
   CASE
     WHEN (utm.session_source IS NULL OR utm.session_source = '')
@@ -87,6 +156,8 @@ SELECT
   m.page_view,
   m.user_signup
 FROM session_bounds sb
-JOIN utm        ON utm.user_pseudo_id = sb.user_pseudo_id AND utm.ga_session_id = sb.ga_session_id
-JOIN geo_device gd ON gd.user_pseudo_id = sb.user_pseudo_id AND gd.ga_session_id = sb.ga_session_id
-JOIN metrics    m  ON m.user_pseudo_id = sb.user_pseudo_id AND m.ga_session_id = sb.ga_session_id
+LEFT JOIN utm            ON utm.user_pseudo_id = sb.user_pseudo_id AND utm.ga_session_id = sb.ga_session_id
+LEFT JOIN geo_country_last gc ON gc.user_pseudo_id = sb.user_pseudo_id AND gc.ga_session_id = sb.ga_session_id
+LEFT JOIN device_last      dv ON dv.user_pseudo_id = sb.user_pseudo_id AND dv.ga_session_id = sb.ga_session_id
+LEFT JOIN platform_last    pf ON pf.user_pseudo_id = sb.user_pseudo_id AND pf.ga_session_id = sb.ga_session_id
+LEFT JOIN metrics           m ON m.user_pseudo_id  = sb.user_pseudo_id AND m.ga_session_id  = sb.ga_session_id
