@@ -45,7 +45,6 @@ SELECT
   NULL AS max_time_on_page,
   pageview_number,
   next_page_url,
-  NULL AS user_type,
   IF(pageview_number = 1, 1, 0) AS isLandingPage,
   IF(pageview_number = MAX(pageview_number) OVER (PARTITION BY session_id), 1, 0) AS isExitPage,
   exit_page_url
