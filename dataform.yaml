@@ -3,3 +3,11 @@ defaultDatabase: hotspawn-440312
 defaultSchema: ga4_neutral
 defaultLocation: EU
 
+vars:
+  schema: ga4_production
+  lookback_days: 3
+  tz: "Europe/Bratislava"
+  page_url_exclusions_csv: "cloudwaysapps.com,wordpressmu,staging"
+
+
+
