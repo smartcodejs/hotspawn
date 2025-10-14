@@ -1,46 +1,60 @@
 config {
   type: "table",
   schema: dataform.projectConfig.vars.schema,
-  tags: ["ga4", "intermediate", "pageviews"],
-  bigquery: { partitionBy: "session_date", clusterBy: ["user_pseudo_id", "session_id"] }
+  tags: ["ga4","intermediate","pageviews"],
+  bigquery: { partitionBy: "session_date", clusterBy: ["user_pseudo_id","session_id"] }
 }
 
-/* 1) Base page_view rows */
+/* 1) Base page_view rows (robust scalar pulls) */
 WITH pv AS (
   SELECT
     DATE(TIMESTAMP_MICROS(event_timestamp)) AS session_date,
     user_pseudo_id,
+
     CONCAT(
       user_pseudo_id, '-',
-      CAST((SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'ga_session_id') AS STRING)
+      CAST(
+        ARRAY(
+          SELECT ep.value.int_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'ga_session_id'
+          LIMIT 1
+        )[SAFE_OFFSET(0)] AS STRING
+      )
     ) AS session_id,
+
     TIMESTAMP_MICROS(event_timestamp) AS event_ts,
 
-    /* page fields */
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_location') AS page_url,
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_title')    AS page_title,
+    ARRAY(
+      SELECT ep.value.string_value
+      FROM UNNEST(event_params) ep
+      WHERE ep.key = 'page_location'
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS page_url,
 
-    /* NEW: author name (try multiple keys) */
+    ARRAY(
+      SELECT ep.value.string_value
+      FROM UNNEST(event_params) ep
+      WHERE ep.key = 'page_title'
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS page_title,
+
+    /* NEW: author name (try several keys) */
     COALESCE(
-      (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'author_name'),
-      (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'author'),
-      (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_author')
+      ARRAY(SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'author_name' LIMIT 1)[SAFE_OFFSET(0)],
+      ARRAY(SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'author'      LIMIT 1)[SAFE_OFFSET(0)],
+      ARRAY(SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_author' LIMIT 1)[SAFE_OFFSET(0)]
     ) AS author_name
 
-  FROM `hotspawn-440312.analytics_457395054.events_*`
+  FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.source_dataset}.events_*`
   WHERE event_name = 'page_view'
     AND _TABLE_SUFFIX BETWEEN
-      FORMAT_DATE(
-        '%Y%m%d',
-        DATE_SUB(
-          CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
-          INTERVAL ${dataform.projectConfig.vars.lookback_days - 1} DAY
-        )
-      )
+      FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+                                     INTERVAL ${dataform.projectConfig.vars.lookback_days - 1} DAY))
       AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
 ),
 
-/* 2) URL parts (simple example; keep your own logic if you prefer) */
+/* 2) URL parts (keep simple and robust) */
 url_parts AS (
   SELECT
     pv.*,
@@ -55,73 +69,95 @@ url_parts AS (
   FROM pv
 ),
 
-/* 3) Define the window to the next page_view in the session */
+/* 3) Pageview windowing */
 windowed AS (
   SELECT
     up.*,
     ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY event_ts)   AS pageview_number,
-    LEAD(page_url) OVER (PARTITION BY session_id ORDER BY event_ts) AS next_page_url,
-    LEAD(event_ts)  OVER (PARTITION BY session_id ORDER BY event_ts) AS next_event_ts
+    LEAD(page_url) OVER   (PARTITION BY session_id ORDER BY event_ts) AS next_page_url,
+    LEAD(event_ts) OVER   (PARTITION BY session_id ORDER BY event_ts) AS next_event_ts
   FROM url_parts up
 ),
 
-/* 4) Scroll events inside the current pageview window */
+/* 4) Scroll events in same (session, page) and between this PV and next PV */
 scroll_events AS (
   SELECT
     CONCAT(
       user_pseudo_id, '-',
-      CAST((SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'ga_session_id') AS STRING)
-    ) AS session_id,
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_location') AS page_url,
-    TIMESTAMP_MICROS(event_timestamp) AS event_ts,
-    COALESCE(
-      (SELECT ep.value.int_value FROM UNNEST(event_params) ep
-       WHERE ep.key IN ('percent_scrolled','scroll_percentage')),
-      SAFE_CAST(
-        (SELECT ep.value.string_value FROM UNNEST(event_params) ep
-         WHERE ep.key IN ('percent_scrolled','scroll_percentage')) AS INT64
+      CAST(
+        ARRAY(
+          SELECT ep.value.int_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'ga_session_id'
+          LIMIT 1
+        )[SAFE_OFFSET(0)] AS STRING
       )
+    ) AS session_id,
+
+    ARRAY(
+      SELECT ep.value.string_value
+      FROM UNNEST(event_params) ep
+      WHERE ep.key = 'page_location'
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS page_url,
+
+    TIMESTAMP_MICROS(event_timestamp) AS event_ts,
+
+    COALESCE(
+      ARRAY(SELECT ep.value.int_value    FROM UNNEST(event_params) ep WHERE ep.key IN ('percent_scrolled','scroll_percentage') LIMIT 1)[SAFE_OFFSET(0)],
+      SAFE_CAST(ARRAY(SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key IN ('percent_scrolled','scroll_percentage') LIMIT 1)[SAFE_OFFSET(0)] AS INT64)
     ) AS scroll_pct
-  FROM `hotspawn-440312.analytics_457395054.events_*`
+
+  FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.source_dataset}.events_*`
   WHERE event_name IN ('scroll','page_scroll')
     AND _TABLE_SUFFIX BETWEEN
-      FORMAT_DATE(
-        '%Y%m%d',
-        DATE_SUB(
-          CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
-          INTERVAL ${dataform.projectConfig.vars.lookback_days - 1} DAY
-        )
-      )
+      FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+                                     INTERVAL ${dataform.projectConfig.vars.lookback_days - 1} DAY))
       AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
 ),
 
-/* 5) Engagement (time on page) events inside the window */
+/* 5) Engagement time on page within the window */
 engagement AS (
   SELECT
     CONCAT(
       user_pseudo_id, '-',
-      CAST((SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'ga_session_id') AS STRING)
+      CAST(
+        ARRAY(
+          SELECT ep.value.int_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'ga_session_id'
+          LIMIT 1
+        )[SAFE_OFFSET(0)] AS STRING
+      )
     ) AS session_id,
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_location') AS page_url,
+
+    ARRAY(
+      SELECT ep.value.string_value
+      FROM UNNEST(event_params) ep
+      WHERE ep.key = 'page_location'
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS page_url,
+
     TIMESTAMP_MICROS(event_timestamp) AS event_ts,
+
     SAFE_CAST(
-      (SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key = 'engagement_time_msec')
-      AS INT64
+      ARRAY(
+        SELECT ep.value.int_value
+        FROM UNNEST(event_params) ep
+        WHERE ep.key = 'engagement_time_msec'
+        LIMIT 1
+      )[SAFE_OFFSET(0)] AS INT64
     ) AS et_ms
-  FROM `hotspawn-440312.analytics_457395054.events_*`
+
+  FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.source_dataset}.events_*`
   WHERE event_name = 'user_engagement'
     AND _TABLE_SUFFIX BETWEEN
-      FORMAT_DATE(
-        '%Y%m%d',
-        DATE_SUB(
-          CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
-          INTERVAL ${dataform.projectConfig.vars.lookback_days - 1} DAY
-        )
-      )
+      FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+                                     INTERVAL ${dataform.projectConfig.vars.lookback_days - 1} DAY))
       AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
 )
 
-/* 6) Roll up to one row per pageview window */
+/* 6) Final rollup per pageview window */
 SELECT
   w.session_date,
   w.user_pseudo_id,
@@ -133,25 +169,18 @@ SELECT
 
   /* NEW */
   w.author_name,
-
-  /* NEW: max scroll % within the window */
-  MAX(se.scroll_pct) AS max_scroll_percentage,
-
-  /* NEW: time on page (seconds) within the window */
-  SAFE_DIVIDE(SUM(e.et_ms), 1000) AS max_time_on_page,
+  MAX(se.scroll_pct)                  AS max_scroll_percentage,
+  SAFE_DIVIDE(SUM(e.et_ms), 1000)     AS max_time_on_page,
 
   w.pageview_number,
   w.next_page_url,
 
-  /* carry-overs */
   IF(w.pageview_number = 1, 1, 0) AS isLandingPage,
   IFNULL(IF(w.next_event_ts IS NULL, 1, 0), 0) AS isExitPage,
-  (
-    SELECT pv_exit.page_url
-    FROM windowed pv_exit
-    WHERE pv_exit.session_id = w.session_id
-      AND pv_exit.event_ts = w.next_event_ts
-  ) AS exit_page_url
+  (SELECT pv_exit.page_url
+   FROM windowed pv_exit
+   WHERE pv_exit.session_id = w.session_id
+     AND pv_exit.event_ts  = w.next_event_ts) AS exit_page_url
 
 FROM windowed w
 LEFT JOIN scroll_events se
