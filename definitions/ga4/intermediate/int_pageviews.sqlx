@@ -5,27 +5,28 @@ config {
   bigquery: { partitionBy: "session_date", clusterBy: ["user_pseudo_id","session_id"] }
 }
 
-/* 1) Base page view rows from your existing RAW view */
+/* 1) Base rows from RAW + build session_id here */
 WITH base AS (
   SELECT
     session_date,
     user_pseudo_id,
-    session_id,
+    CONCAT(user_pseudo_id, '-', CAST(ga_session_id AS STRING)) AS session_id,
     event_ts,
     page_url,
     page_title,
-    -- now coming from RAW
+    theme_category,
+    page_category,
     author_name
   FROM ${ref("raw_page_source")}
 ),
 
-/* 2) Add next-page boundary in the session */
+/* 2) Add next-page boundary within the session */
 windowed AS (
   SELECT
     b.*,
-    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY event_ts)             AS pageview_number,
-    LEAD(page_url)  OVER (PARTITION BY session_id ORDER BY event_ts)          AS next_page_url,
-    LEAD(event_ts)  OVER (PARTITION BY session_id ORDER BY event_ts)          AS next_event_ts
+    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY event_ts) AS pageview_number,
+    LEAD(page_url) OVER (PARTITION BY session_id ORDER BY event_ts) AS next_page_url,
+    LEAD(event_ts)  OVER (PARTITION BY session_id ORDER BY event_ts) AS next_event_ts
   FROM base b
 ),
 
@@ -37,13 +38,13 @@ scroll_events AS (
       CAST(ARRAY(
              SELECT ep.value.int_value
              FROM UNNEST(event_params) ep
-             WHERE ep.key='ga_session_id'
+             WHERE ep.key = 'ga_session_id'
            )[SAFE_OFFSET(0)] AS STRING)
     ) AS session_id,
-    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key = 'page_location') AS page_url,
+    (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key='page_location') AS page_url,
     TIMESTAMP_MICROS(event_timestamp) AS event_ts,
     COALESCE(
-      (SELECT ep.value.int_value FROM UNNEST(event_params) ep WHERE ep.key IN ('percent_scrolled','scroll_percentage')),
+      (SELECT ep.value.int_value    FROM UNNEST(event_params) ep WHERE ep.key IN ('percent_scrolled','scroll_percentage')),
       SAFE_CAST((SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key IN ('percent_scrolled','scroll_percentage')) AS INT64)
     ) AS scroll_pct
   FROM `hotspawn-440312.analytics_457395054.events_*`
@@ -55,7 +56,7 @@ scroll_events AS (
       AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
 ),
 
-/* 4) Engagement time (user_engagement) within the same page window */
+/* 4) Engagement time within the same page window */
 engagement AS (
   SELECT
     CONCAT(
@@ -63,7 +64,7 @@ engagement AS (
       CAST(ARRAY(
              SELECT ep.value.int_value
              FROM UNNEST(event_params) ep
-             WHERE ep.key='ga_session_id'
+             WHERE ep.key = 'ga_session_id'
            )[SAFE_OFFSET(0)] AS STRING)
     ) AS session_id,
     (SELECT ep.value.string_value FROM UNNEST(event_params) ep WHERE ep.key='page_location') AS page_url,
@@ -81,46 +82,38 @@ engagement AS (
       AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
 )
 
-/* 5) Final output (add the three metrics; keep existing flags/fields) */
+/* 5) Final output with your three metrics */
 SELECT
   w.session_date,
   w.user_pseudo_id,
   w.session_id,
   w.page_url,
   w.page_title,
-
-  -- carry over the author captured in RAW
+  w.theme_category,
+  w.page_category,
   w.author_name,
-
-  -- NEW metrics
-  MAX(se.scroll_pct)              AS max_scroll_percentage,
-  SAFE_DIVIDE(SUM(e.et_ms),1000)  AS max_time_on_page,
-
-  -- navigation helpers you already used
+  MAX(se.scroll_pct)             AS max_scroll_percentage,
+  SAFE_DIVIDE(SUM(e.et_ms),1000) AS max_time_on_page,
   w.pageview_number,
   w.next_page_url,
   IF(w.pageview_number = 1, 1, 0) AS isLandingPage,
   IFNULL(IF(w.next_event_ts IS NULL, 1, 0), 0) AS isExitPage,
-
   (SELECT pv_exit.page_url
-   FROM windowed pv_exit
-   WHERE pv_exit.session_id = w.session_id
-     AND pv_exit.event_ts = w.next_event_ts) AS exit_page_url
-
+     FROM windowed pv_exit
+    WHERE pv_exit.session_id = w.session_id
+      AND pv_exit.event_ts   = w.next_event_ts) AS exit_page_url
 FROM windowed w
 LEFT JOIN scroll_events se
   ON  se.session_id = w.session_id
   AND se.page_url   = w.page_url
   AND se.event_ts  >= w.event_ts
   AND (w.next_event_ts IS NULL OR se.event_ts < w.next_event_ts)
-
 LEFT JOIN engagement e
   ON  e.session_id = w.session_id
   AND e.page_url   = w.page_url
   AND e.event_ts  >= w.event_ts
   AND (w.next_event_ts IS NULL OR e.event_ts < w.next_event_ts)
-
 GROUP BY
-  w.session_date, w.user_pseudo_id, w.session_id,
-  w.page_url, w.page_title, w.author_name,
+  w.session_date, w.user_pseudo_id, w.session_id, w.page_url, w.page_title,
+  w.theme_category, w.page_category, w.author_name,
   w.pageview_number, w.next_page_url, w.event_ts, w.next_event_ts
