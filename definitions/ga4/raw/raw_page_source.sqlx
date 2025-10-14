@@ -4,49 +4,43 @@ config {
   tags: ["ga4","raw","pageviews"]
 }
 
-/* Safe helper macros for single-value pulls */
-DECLARE start_8 STRING DEFAULT REPLACE("${dataform.projectConfig.vars.start_date}", "-", "");
-DECLARE end_8   STRING DEFAULT REPLACE("${dataform.projectConfig.vars.end_date}",   "-", "");
-
 WITH src AS (
   SELECT
     TIMESTAMP_MICROS(event_timestamp) AS event_ts,
     DATE(TIMESTAMP_MICROS(event_timestamp)) AS session_date,
     user_pseudo_id,
 
-    -- ga_session_id (first occurrence only)
-    (SELECT ARRAY_AGG(ep.value.int_value     IGNORE NULLS LIMIT 1)[OFFSET(0)]
+    -- ga_session_id (first occurrence)
+    (SELECT ARRAY_AGG(ep.value.int_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
        FROM UNNEST(event_params) ep
       WHERE ep.key = 'ga_session_id') AS ga_session_id,
 
-    -- page fields (first occurrence only)
+    -- page fields (first occurrence)
     (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-       FROM UNNEST(event_params) ep
-      WHERE ep.key = 'page_location') AS page_url,
-
+       FROM UNNEST(event_params) ep WHERE ep.key='page_location') AS page_url,
     (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-       FROM UNNEST(event_params) ep
-      WHERE ep.key = 'page_title') AS page_title,
+       FROM UNNEST(event_params) ep WHERE ep.key='page_title')    AS page_title,
 
-    -- author: try multiple keys, each made scalar safely
+    -- author (try a few keys, each made scalar safely)
     COALESCE(
       (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-         FROM UNNEST(event_params) ep WHERE ep.key = 'author_name'),
+         FROM UNNEST(event_params) ep WHERE ep.key='author_name'),
       (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-         FROM UNNEST(event_params) ep WHERE ep.key = 'author'),
+         FROM UNNEST(event_params) ep WHERE ep.key='author'),
       (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-         FROM UNNEST(event_params) ep WHERE ep.key = 'page_author')
+         FROM UNNEST(event_params) ep WHERE ep.key='page_author')
     ) AS author_name
   FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.source_dataset}.events_*`
   WHERE event_name = 'page_view'
-    AND _TABLE_SUFFIX BETWEEN start_8 AND end_8
+    AND _TABLE_SUFFIX BETWEEN
+          REPLACE("${dataform.projectConfig.vars.start_date}", "-", "")
+      AND REPLACE("${dataform.projectConfig.vars.end_date}",   "-", "")
 )
 
 SELECT
   event_ts, session_date, user_pseudo_id, ga_session_id,
   page_url, page_title,
-  /* simple URL parsing, leave as-is if you already had something working */
-  COALESCE(REGEXP_EXTRACT(page_url, r'https?://[^/]+/([^/?#]+)'), 'home') AS theme_category,
+  COALESCE(REGEXP_EXTRACT(page_url, r'https?://[^/]+/([^/?#]+)'), 'home')        AS theme_category,
   COALESCE(REGEXP_EXTRACT(page_url, r'https?://[^/]+/[^/]+/([^/?#]+)'), 'home') AS page_category,
   author_name
 FROM src
