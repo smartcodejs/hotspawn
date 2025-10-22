@@ -9,38 +9,52 @@ WITH src AS (
     TIMESTAMP_MICROS(event_timestamp) AS event_ts,
     DATE(TIMESTAMP_MICROS(event_timestamp)) AS session_date,
     user_pseudo_id,
-
-    -- ga_session_id (first occurrence)
     (SELECT ARRAY_AGG(ep.value.int_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
        FROM UNNEST(event_params) ep
       WHERE ep.key = 'ga_session_id') AS ga_session_id,
-
-    -- page fields (first occurrence)
     (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
        FROM UNNEST(event_params) ep WHERE ep.key='page_location') AS page_url,
     (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-       FROM UNNEST(event_params) ep WHERE ep.key='page_title')    AS page_title,
-
-    -- author (try a few keys, each made scalar safely)
-    COALESCE(
-      (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-         FROM UNNEST(event_params) ep WHERE ep.key='author_name'),
-      (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-         FROM UNNEST(event_params) ep WHERE ep.key='author'),
-      (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-         FROM UNNEST(event_params) ep WHERE ep.key='page_author')
-    ) AS author_name
+       FROM UNNEST(event_params) ep WHERE ep.key='page_title') AS page_title
   FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.source_dataset}.events_*`
   WHERE event_name = 'page_view'
+    AND (SELECT ARRAY_AGG(ep.value.int_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
+           FROM UNNEST(event_params) ep WHERE ep.key='ga_session_id') IS NOT NULL
     AND _TABLE_SUFFIX BETWEEN
           REPLACE("${dataform.projectConfig.vars.start_date}", "-", "")
       AND REPLACE("${dataform.projectConfig.vars.end_date}",   "-", "")
+),
+
+url_exclusions AS (
+  SELECT 'cloudwaysapps.com' AS domain
+  UNION ALL SELECT 'wordpressmu'
+  UNION ALL SELECT 'staging'
 )
 
 SELECT
-  event_ts, session_date, user_pseudo_id, ga_session_id,
-  page_url, page_title,
-  COALESCE(REGEXP_EXTRACT(page_url, r'https?://[^/]+/([^/?#]+)'), 'home')        AS theme_category,
-  COALESCE(REGEXP_EXTRACT(page_url, r'https?://[^/]+/[^/]+/([^/?#]+)'), 'home') AS page_category,
-  author_name
+  event_ts,
+  session_date,
+  user_pseudo_id,
+  ga_session_id,
+  page_url,
+  page_title,
+  COALESCE(
+    NULLIF(
+      SPLIT(REGEXP_EXTRACT(page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(0)],
+      ''
+    ),
+    'hotspawn'
+  ) AS theme_category,
+  COALESCE(
+    NULLIF(
+      SPLIT(REGEXP_EXTRACT(page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(1)],
+      ''
+    ),
+    'hotspawn'
+  ) AS page_category
 FROM src
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM url_exclusions e
+  WHERE LOWER(page_url) LIKE CONCAT('%', e.domain, '%')
+)

@@ -1,7 +1,7 @@
 config {
   type: "incremental",
   schema: dataform.projectConfig.vars.schema,
-  tags: ["ga4","mart","pageviews"],
+  tags: ["ga4","mart","pageviews","volume2"],
   bigquery: { partitionBy: "session_date", clusterBy: ["user_pseudo_id","session_id"] },
   uniqueKey: ["session_id","pageview_number"]
 }
