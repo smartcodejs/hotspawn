@@ -5,12 +5,13 @@ config {
   bigquery: { partitionBy: "session_date", clusterBy: ["user_pseudo_id","session_id"] }
 }
 
-WITH base AS (
+/* Pull base page views from the RAW view. */
+WITH pv AS (
   SELECT
     session_date,
     user_pseudo_id,
-    CONCAT(user_pseudo_id, '-', CAST(ga_session_id AS STRING)) AS session_id,
-    event_ts,
+    session_id,
+    pageview_time,
     page_url,
     page_title,
     theme_category,
@@ -23,143 +24,69 @@ WITH base AS (
   `)}
 ),
 
-windowed AS (
+/* Author events: static logic (join by user + page, no PV time window). */
+article_data AS (
   SELECT
-    b.*,
-    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY event_ts)    AS pageview_number,
-    LEAD(page_url) OVER (PARTITION BY session_id ORDER BY event_ts)  AS next_page_url,
-    LEAD(event_ts)  OVER (PARTITION BY session_id ORDER BY event_ts) AS next_event_ts
-  FROM base b
-),
-
--- author from article_view
-author_events AS (
-  SELECT
-    CONCAT(user_pseudo_id, '-', CAST(
-      (SELECT ARRAY_AGG(ep.value.int_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-         FROM UNNEST(event_params) ep WHERE ep.key='ga_session_id') AS STRING)
-    ) AS session_id,
-    (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-       FROM UNNEST(event_params) ep WHERE ep.key='page_location') AS page_url,
-    TIMESTAMP_MICROS(event_timestamp) AS event_ts,
+    user_pseudo_id,
+    (SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key='page_location') AS page_url,
     COALESCE(
-      NULLIF(
-        (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-           FROM UNNEST(event_params) ep WHERE ep.key='author_name'),
-        ''
-      ),
+      NULLIF((SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key='author_name'), ''),
       'hotspawn'
     ) AS author_name
   FROM `hotspawn-440312.analytics_457395054.events_*`
   WHERE event_name='article_view'
-    AND _TABLE_SUFFIX BETWEEN
-          FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
-                                         INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY))
-      AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
 ),
 
--- scroll_depth -> max scroll % per (session_id, page_url)
-scroll_events AS (
+/* Scroll depth: MAX per (session_id, page_url). */
+scr_data AS (
   SELECT
-    CONCAT(user_pseudo_id, '-', CAST(
-      (SELECT ARRAY_AGG(ep.value.int_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-         FROM UNNEST(event_params) ep WHERE ep.key='ga_session_id') AS STRING)
-    ) AS session_id,
-    (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-       FROM UNNEST(event_params) ep WHERE ep.key='page_location') AS page_url,
-    MAX(
-      (SELECT ARRAY_AGG(ep.value.int_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-         FROM UNNEST(event_params) ep WHERE ep.key='scroll_percentage')
-    ) AS max_scroll_percentage
+    CONCAT(user_pseudo_id, '-', CAST((SELECT p.value.int_value FROM UNNEST(event_params) p WHERE p.key='ga_session_id') AS STRING)) AS session_id,
+    (SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key='page_location') AS page_url,
+    MAX((SELECT p.value.int_value FROM UNNEST(event_params) p WHERE p.key='scroll_percentage')) AS max_scroll_percentage
   FROM `hotspawn-440312.analytics_457395054.events_*`
   WHERE event_name='scroll_depth'
-    AND _TABLE_SUFFIX BETWEEN
-          FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
-                                         INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY))
-      AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
   GROUP BY session_id, page_url
 ),
 
--- time_on_page -> max time per (session_id, page_url)
+/* Time on page: MAX per (session_id, page_url). */
 time_spent_data AS (
   SELECT
-    CONCAT(user_pseudo_id, '-', CAST(
-      (SELECT ARRAY_AGG(ep.value.int_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-         FROM UNNEST(event_params) ep WHERE ep.key='ga_session_id') AS STRING)
-    ) AS session_id,
-    (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-       FROM UNNEST(event_params) ep WHERE ep.key='page_location') AS page_url,
-    MAX(
-      SAFE_CAST(
-        REGEXP_EXTRACT(
-          (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
-             FROM UNNEST(event_params) ep WHERE ep.key='time_spent'),
-          r'^(\d+)'
-        ) AS INT64
-      )
-    ) AS max_time_on_page
+    CONCAT(user_pseudo_id, '-', CAST((SELECT p.value.int_value FROM UNNEST(event_params) p WHERE p.key='ga_session_id') AS STRING)) AS session_id,
+    (SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key='page_location') AS page_url,
+    MAX(SAFE_CAST(REGEXP_EXTRACT((SELECT p.value.string_value FROM UNNEST(event_params) p WHERE p.key='time_spent'), r'^(\d+)') AS INT64)) AS max_time_on_page
   FROM `hotspawn-440312.analytics_457395054.events_*`
   WHERE event_name='time_on_page'
-    AND _TABLE_SUFFIX BETWEEN
-          FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
-                                         INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY))
-      AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
   GROUP BY session_id, page_url
-),
-
-author_by_page AS (
-  SELECT
-    w.session_id, w.page_url, w.event_ts,
-    ANY_VALUE(a.author_name) AS author_name
-  FROM windowed w
-  LEFT JOIN author_events a
-    ON a.session_id = w.session_id
-   AND a.page_url   = w.page_url
-   AND a.event_ts  >= w.event_ts
-   AND (w.next_event_ts IS NULL OR a.event_ts < w.next_event_ts)
-  GROUP BY w.session_id, w.page_url, w.event_ts
-),
-
-next_pv AS (
-  SELECT
-    w.session_id, w.event_ts,
-    ANY_VALUE(n.page_url) AS exit_page_url
-  FROM windowed w
-  LEFT JOIN windowed n
-    ON n.session_id = w.session_id
-   AND n.event_ts   = w.next_event_ts
-  GROUP BY w.session_id, w.event_ts
 )
 
+/* Final step mirrors the static SELECT (including GROUP BY over pageview_time and the window calcs). */
 SELECT
-  -- standard + compatibility
-  w.session_date                                  AS date,           -- standard
-  w.session_date                                  AS session_date,   -- compat
-  w.user_pseudo_id                                AS pseud_id,       -- standard
-  w.user_pseudo_id                                                 , -- compat (user_pseudo_id)
-  w.session_id,
-  w.page_url,
-  w.page_title,
-  w.theme_category,
-  w.page_category,
-  COALESCE(abp.author_name, 'hotspawn')           AS author_name,
-  MAX(se.max_scroll_percentage)                   AS max_scroll_percentage,
-  MAX(ts.max_time_on_page)                        AS max_time_on_page,
-  w.pageview_number,
-  w.next_page_url,
-  IF(w.pageview_number = 1, 1, 0)                 AS isLandingPage,
-  IFNULL(IF(w.next_event_ts IS NULL, 1, 0), 0)    AS isExitPage,
-  ANY_VALUE(np.exit_page_url)                     AS exit_page_url
-FROM windowed w
-LEFT JOIN scroll_events se
-  ON se.session_id = w.session_id AND se.page_url = w.page_url
-LEFT JOIN time_spent_data ts
-  ON ts.session_id = w.session_id AND ts.page_url = w.page_url
-LEFT JOIN author_by_page abp
-  ON abp.session_id = w.session_id AND abp.page_url = w.page_url AND abp.event_ts = w.event_ts
-LEFT JOIN next_pv np
-  ON np.session_id = w.session_id AND np.event_ts = w.event_ts
+  pv.session_date,
+  pv.user_pseudo_id,
+  pv.session_id,
+  pv.page_url,
+  pv.page_title,
+
+  COALESCE(MAX(pv.theme_category), 'hotspawn') AS theme_category,
+  COALESCE(MAX(pv.page_category),  'hotspawn') AS page_category,
+
+  /* Keep raw values (no defaults) here; mart will apply defaults to match static table’s final SELECT. */
+  MAX(ad.author_name)                    AS author_name,          -- will COALESCE in mart
+  MAX(scr.max_scroll_percentage)         AS max_scroll_percentage, -- will COALESCE in mart
+  MAX(ts.max_time_on_page)               AS max_time_on_page,      -- will COALESCE in mart
+
+  ROW_NUMBER() OVER (PARTITION BY pv.session_id ORDER BY pv.pageview_time)                                  AS pageview_number,
+  LEAD(pv.page_url) OVER (PARTITION BY pv.session_id ORDER BY pv.pageview_time)                              AS next_page_url,
+  CASE WHEN ROW_NUMBER() OVER (PARTITION BY pv.session_id ORDER BY pv.pageview_time) = 1 THEN 1 ELSE 0 END   AS isLandingPage,
+  CASE WHEN ROW_NUMBER() OVER (PARTITION BY pv.session_id ORDER BY pv.pageview_time DESC) = 1 THEN 1 ELSE 0 END AS isExitPage,
+  LAST_VALUE(pv.page_url) OVER (
+    PARTITION BY pv.session_id
+    ORDER BY pv.pageview_time
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  ) AS exit_page_url
+FROM pv
+LEFT JOIN article_data   ad  ON pv.page_url = ad.page_url AND pv.user_pseudo_id = ad.user_pseudo_id
+LEFT JOIN scr_data       scr ON pv.session_id = scr.session_id AND pv.page_url = scr.page_url
+LEFT JOIN time_spent_data ts ON pv.session_id = ts.session_id AND pv.page_url = ts.page_url
 GROUP BY
-  date, session_date, pseud_id, w.user_pseudo_id, w.session_id, w.page_url, w.page_title,
-  w.theme_category, w.page_category, abp.author_name,
-  w.pageview_number, w.next_page_url, w.event_ts, w.next_event_ts
+  pv.session_date, pv.user_pseudo_id, pv.session_id, pv.page_url, pv.page_title, pv.pageview_time

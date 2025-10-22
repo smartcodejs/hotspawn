@@ -2,40 +2,36 @@ config {
   type: "incremental",
   schema: dataform.projectConfig.vars.schema,
   tags: ["ga4","mart","pageviews","volume2"],
-  bigquery: { partitionBy: "date", clusterBy: ["pseud_id","session_id"] },
+  bigquery: { partitionBy: "session_date", clusterBy: ["user_pseudo_id","session_id"] },
   uniqueKey: ["session_id","pageview_number"]
 }
 
+/* Apply the same defaults as your static table’s final SELECT:
+   - author_name       → COALESCE(..., 'hotspawn')
+   - max_scroll_%      → COALESCE(..., 10)
+   - max_time_on_page  → COALESCE(..., 15)
+*/
 SELECT
-  -- standardized “mart” shape (matches your session mart’s naming)
-  date,
-  pseud_id,
+  session_date,
+  user_pseudo_id,
   session_id,
-
-  -- pageview fields
   page_url,
   page_title,
   theme_category,
   page_category,
 
-  -- THE 3 COLUMNS you asked for
-  author_name,
-  max_scroll_percentage,
-  max_time_on_page,
+  COALESCE(author_name, 'hotspawn') AS author_name,
+  COALESCE(max_scroll_percentage, 10) AS max_scroll_percentage,
+  COALESCE(max_time_on_page, 15) AS max_time_on_page,
 
-  -- navigation flags
   pageview_number,
   next_page_url,
   isLandingPage,
   isExitPage,
-  exit_page_url,
-
-  -- compatibility fields (kept for Looker/LS reports using old names)
-  session_date,
-  user_pseudo_id
+  exit_page_url
 FROM ${ref("int_pageviews")}
 ${when(incremental(), `
-  WHERE date BETWEEN DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
-                              INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY)
-                 AND CURRENT_DATE('${dataform.projectConfig.vars.tz}')
+  WHERE session_date BETWEEN DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+                                      INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY)
+                        AND CURRENT_DATE('${dataform.projectConfig.vars.tz}')
 `)}
