@@ -4,31 +4,36 @@ config {
   tags: ["ga4","raw","pageviews"]
 }
 
-WITH src AS (
+-- Turn CSV exclusions into rows (same mechanism you prefer)
+WITH url_exclusions AS (
+  SELECT TRIM(x) AS domain
+  FROM UNNEST(SPLIT("${dataform.projectConfig.vars.page_url_exclusions_csv}", ",")) AS x
+),
+
+src AS (
   SELECT
     TIMESTAMP_MICROS(event_timestamp) AS event_ts,
     DATE(TIMESTAMP_MICROS(event_timestamp)) AS session_date,
     user_pseudo_id,
+
+    -- first ga_session_id
     (SELECT ARRAY_AGG(ep.value.int_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
        FROM UNNEST(event_params) ep
       WHERE ep.key = 'ga_session_id') AS ga_session_id,
+
+    -- page fields
     (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
        FROM UNNEST(event_params) ep WHERE ep.key='page_location') AS page_url,
     (SELECT ARRAY_AGG(ep.value.string_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
        FROM UNNEST(event_params) ep WHERE ep.key='page_title') AS page_title
-  FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.source_dataset}.events_*`
+  FROM `hotspawn-440312.analytics_457395054.events_*`
   WHERE event_name = 'page_view'
     AND (SELECT ARRAY_AGG(ep.value.int_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
            FROM UNNEST(event_params) ep WHERE ep.key='ga_session_id') IS NOT NULL
     AND _TABLE_SUFFIX BETWEEN
-          REPLACE("${dataform.projectConfig.vars.start_date}", "-", "")
-      AND REPLACE("${dataform.projectConfig.vars.end_date}",   "-", "")
-),
-
-url_exclusions AS (
-  SELECT 'cloudwaysapps.com' AS domain
-  UNION ALL SELECT 'wordpressmu'
-  UNION ALL SELECT 'staging'
+          FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+                                         INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY))
+      AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
 )
 
 SELECT
@@ -39,22 +44,15 @@ SELECT
   page_url,
   page_title,
   COALESCE(
-    NULLIF(
-      SPLIT(REGEXP_EXTRACT(page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(0)],
-      ''
-    ),
+    NULLIF(SPLIT(REGEXP_EXTRACT(page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(0)], ''),
     'hotspawn'
   ) AS theme_category,
   COALESCE(
-    NULLIF(
-      SPLIT(REGEXP_EXTRACT(page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(1)],
-      ''
-    ),
+    NULLIF(SPLIT(REGEXP_EXTRACT(page_url, r'^https?://[^/]+/([^?#]*)'), '/')[SAFE_OFFSET(1)], ''),
     'hotspawn'
   ) AS page_category
 FROM src
 WHERE NOT EXISTS (
-  SELECT 1
-  FROM url_exclusions e
+  SELECT 1 FROM url_exclusions e
   WHERE LOWER(page_url) LIKE CONCAT('%', e.domain, '%')
 )

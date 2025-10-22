@@ -50,18 +50,12 @@ author_events AS (
       ),
       'hotspawn'
     ) AS author_name
-  FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.source_dataset}.events_*`
+  FROM `hotspawn-440312.analytics_457395054.events_*`
   WHERE event_name='article_view'
-    ${when(incremental(), `
-      AND _TABLE_SUFFIX BETWEEN
-            FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
-                                           INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY))
-        AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
-    `, `
-      AND _TABLE_SUFFIX BETWEEN
-            REPLACE("${dataform.projectConfig.vars.start_date}", "-", "")
-        AND REPLACE("${dataform.projectConfig.vars.end_date}",   "-", "")
-    `)}
+    AND _TABLE_SUFFIX BETWEEN
+          FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+                                         INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY))
+      AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
 ),
 
 -- scroll_depth -> max scroll % per (session_id, page_url)
@@ -77,18 +71,12 @@ scroll_events AS (
       (SELECT ARRAY_AGG(ep.value.int_value IGNORE NULLS LIMIT 1)[OFFSET(0)]
          FROM UNNEST(event_params) ep WHERE ep.key='scroll_percentage')
     ) AS max_scroll_percentage
-  FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.source_dataset}.events_*`
+  FROM `hotspawn-440312.analytics_457395054.events_*`
   WHERE event_name='scroll_depth'
-    ${when(incremental(), `
-      AND _TABLE_SUFFIX BETWEEN
-            FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
-                                           INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY))
-        AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
-    `, `
-      AND _TABLE_SUFFIX BETWEEN
-            REPLACE("${dataform.projectConfig.vars.start_date}", "-", "")
-        AND REPLACE("${dataform.projectConfig.vars.end_date}",   "-", "")
-    `)}
+    AND _TABLE_SUFFIX BETWEEN
+          FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+                                         INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY))
+      AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
   GROUP BY session_id, page_url
 ),
 
@@ -110,18 +98,12 @@ time_spent_data AS (
         ) AS INT64
       )
     ) AS max_time_on_page
-  FROM `${dataform.projectConfig.defaultDatabase}.${dataform.projectConfig.vars.source_dataset}.events_*`
+  FROM `hotspawn-440312.analytics_457395054.events_*`
   WHERE event_name='time_on_page'
-    ${when(incremental(), `
-      AND _TABLE_SUFFIX BETWEEN
-            FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
-                                           INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY))
-        AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
-    `, `
-      AND _TABLE_SUFFIX BETWEEN
-            REPLACE("${dataform.projectConfig.vars.start_date}", "-", "")
-        AND REPLACE("${dataform.projectConfig.vars.end_date}",   "-", "")
-    `)}
+    AND _TABLE_SUFFIX BETWEEN
+          FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+                                         INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY))
+      AND FORMAT_DATE('%Y%m%d', CURRENT_DATE('${dataform.projectConfig.vars.tz}'))
   GROUP BY session_id, page_url
 ),
 
@@ -150,21 +132,24 @@ next_pv AS (
 )
 
 SELECT
-  w.session_date,
-  w.user_pseudo_id,
+  -- standard + compatibility
+  w.session_date                                  AS date,           -- standard
+  w.session_date                                  AS session_date,   -- compat
+  w.user_pseudo_id                                AS pseud_id,       -- standard
+  w.user_pseudo_id                                                 , -- compat (user_pseudo_id)
   w.session_id,
   w.page_url,
   w.page_title,
   w.theme_category,
   w.page_category,
-  COALESCE(abp.author_name, 'hotspawn') AS author_name,
-  MAX(se.max_scroll_percentage)         AS max_scroll_percentage,
-  MAX(ts.max_time_on_page)              AS max_time_on_page,
+  COALESCE(abp.author_name, 'hotspawn')           AS author_name,
+  MAX(se.max_scroll_percentage)                   AS max_scroll_percentage,
+  MAX(ts.max_time_on_page)                        AS max_time_on_page,
   w.pageview_number,
   w.next_page_url,
-  IF(w.pageview_number = 1, 1, 0)       AS isLandingPage,
-  IFNULL(IF(w.next_event_ts IS NULL, 1, 0), 0) AS isExitPage,
-  ANY_VALUE(np.exit_page_url)           AS exit_page_url
+  IF(w.pageview_number = 1, 1, 0)                 AS isLandingPage,
+  IFNULL(IF(w.next_event_ts IS NULL, 1, 0), 0)    AS isExitPage,
+  ANY_VALUE(np.exit_page_url)                     AS exit_page_url
 FROM windowed w
 LEFT JOIN scroll_events se
   ON se.session_id = w.session_id AND se.page_url = w.page_url
@@ -175,6 +160,6 @@ LEFT JOIN author_by_page abp
 LEFT JOIN next_pv np
   ON np.session_id = w.session_id AND np.event_ts = w.event_ts
 GROUP BY
-  w.session_date, w.user_pseudo_id, w.session_id, w.page_url, w.page_title,
+  date, session_date, pseud_id, w.user_pseudo_id, w.session_id, w.page_url, w.page_title,
   w.theme_category, w.page_category, abp.author_name,
   w.pageview_number, w.next_page_url, w.event_ts, w.next_event_ts
