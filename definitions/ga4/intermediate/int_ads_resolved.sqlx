@@ -1,0 +1,176 @@
+config {
+  type: "view",
+  tags: ["intermediate", "ads", "ga4"]
+}
+
+/*
+  Ads logic:
+  - derive session_id, placement_id, advertiser_name
+  - resolve missing advertiser per session + placement
+  - assign human-readable placement label
+  - derive page_category & theme_category from URL
+  - restrict to current year (Jan 1 -> today)
+*/
+
+WITH events_ytd AS (
+  SELECT
+    DATE(TIMESTAMP_MICROS(e.event_timestamp)) AS date,
+    e.geo.country AS country,
+    e.device.category AS device,
+    e.platform,
+    e.user_pseudo_id,
+    CONCAT(
+      e.user_pseudo_id, '-',
+      CAST(
+        (SELECT ep.value.int_value
+         FROM UNNEST(e.event_params) ep
+         WHERE ep.key = 'ga_session_id'
+         LIMIT 1) AS STRING
+      )
+    ) AS session_id,
+
+    -- page URL
+    COALESCE(
+      (SELECT ep.value.string_value
+       FROM UNNEST(e.event_params) ep
+       WHERE ep.key = 'page_url'
+       LIMIT 1),
+      (SELECT ep.value.string_value
+       FROM UNNEST(e.event_params) ep
+       WHERE ep.key = 'page_location'
+       LIMIT 1)
+    ) AS page_url,
+
+    -- ad tag fields
+    (SELECT ep.value.string_value
+     FROM UNNEST(e.event_params) ep
+     WHERE ep.key = 'banner_class'
+     LIMIT 1) AS banner_class,
+
+    (SELECT ep.value.string_value
+     FROM UNNEST(e.event_params) ep
+     WHERE ep.key = 'banner_placement'
+     LIMIT 1) AS banner_placement_tag,
+
+    (SELECT ep.value.string_value
+     FROM UNNEST(e.event_params) ep
+     WHERE ep.key = 'advertiser_name'
+     LIMIT 1) AS advertiser_name,
+
+    -- placement id from banner_id or from banner_class (plc909046 -> 909046)
+    COALESCE(
+      CAST(
+        (SELECT ep.value.int_value
+         FROM UNNEST(e.event_params) ep
+         WHERE ep.key='banner_id'
+         LIMIT 1) AS STRING
+      ),
+      (SELECT ep.value.string_value
+       FROM UNNEST(e.event_params) ep
+       WHERE ep.key='banner_id'
+       LIMIT 1),
+      REGEXP_EXTRACT(
+        (SELECT ep.value.string_value
+         FROM UNNEST(e.event_params) ep
+         WHERE ep.key='banner_class'
+         LIMIT 1),
+        r'(?:^plc)?(\d{6})'
+      )
+    ) AS placement_id,
+
+    e.event_name,
+
+    -- content structure from URL
+    COALESCE(
+      NULLIF(SPLIT(REGEXP_EXTRACT(
+        COALESCE(
+          (SELECT ep.value.string_value
+           FROM UNNEST(e.event_params) ep
+           WHERE ep.key='page_url'
+           LIMIT 1),
+          (SELECT ep.value.string_value
+           FROM UNNEST(e.event_params) ep
+           WHERE ep.key='page_location'
+           LIMIT 1)
+        ),
+        r'^https?://[^/]+/([^?#]*)'
+      ), '/')[SAFE_OFFSET(0)], ''),
+      'hotspawn'
+    ) AS page_category,
+
+    COALESCE(
+      NULLIF(SPLIT(REGEXP_EXTRACT(
+        COALESCE(
+          (SELECT ep.value.string_value
+           FROM UNNEST(e.event_params) ep
+           WHERE ep.key='page_url'
+           LIMIT 1),
+          (SELECT ep.value.string_value
+           FROM UNNEST(e.event_params) ep
+           WHERE ep.key='page_location'
+           LIMIT 1)
+        ),
+        r'^https?://[^/]+/([^?#]*)'
+      ), '/')[SAFE_OFFSET(1)], ''),
+      'hotspawn'
+    ) AS theme_category
+  FROM ${ref("raw_ads_events")} e
+  WHERE e.export_suffix BETWEEN
+        FORMAT_DATE('%Y%m%d', DATE_TRUNC(CURRENT_DATE(), YEAR))
+    AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+),
+
+-- resolve advertiser within session + placement
+resolved AS (
+  SELECT
+    *,
+    MAX(advertiser_name) OVER (
+      PARTITION BY session_id, placement_id
+    ) AS resolved_advertiser_name
+  FROM events_ytd
+),
+
+-- assign human-readable placement label
+with_placement AS (
+  SELECT
+    *,
+    COALESCE(
+      banner_placement_tag,
+      CASE placement_id
+        WHEN '909090' THEN 'HS Homepage – 1200×140 Leaderboard Top Fixed'
+        WHEN '909089' THEN 'HS Homepage – 1200×140 Leaderboard Footer Fixed'
+        WHEN '909046' THEN 'HS Article Page (news/guides) – Right Col 325×240'
+        WHEN '909047' THEN 'HS Game Title – Leaderboard Footer 820×140 Fixed'
+        WHEN '909049' THEN 'HS Game Title – Leaderboard Top 820×140 Fixed'
+        WHEN '909051' THEN 'HS Game Title – Right Col Mid 325×140 Fixed'
+        WHEN '909087' THEN 'HS Game Title – Right Col Top 325×240 Fixed'
+        WHEN '909092' THEN 'HS Listing Page – Right Col 325×240 Fixed'
+        WHEN '909094' THEN 'HS Tournament Article Page – Right Col 325×240'
+        WHEN '909636' THEN 'HS Tournament Detail Page – Right Col Top 325×240'
+        WHEN '909121' THEN 'HS Tournament Listing Page – Right Col 325×240'
+        ELSE 'unknown-placement'
+      END
+    ) AS ad_placement
+  FROM resolved
+)
+
+SELECT
+  date,
+  country,
+  device,
+  platform,
+  user_pseudo_id,
+  session_id,
+  page_url,
+  page_category,
+  theme_category,
+  ad_placement,
+  event_name,
+  CASE
+    WHEN REGEXP_CONTAINS(LOWER(resolved_advertiser_name), r'\brankrush\b')
+      THEN 'rankrush'
+    WHEN REGEXP_CONTAINS(LOWER(resolved_advertiser_name), r'\bhot\s*spawn\b')
+      THEN 'hotspawn'
+    ELSE 'Thunderpick World Championship October 15th-19th 2025'
+  END AS advertiser_name
+FROM with_placement

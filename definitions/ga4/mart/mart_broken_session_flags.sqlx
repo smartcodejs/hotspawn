@@ -1,0 +1,39 @@
+config {
+  type: "table",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4", "mart", "qa"]
+}
+
+/*
+  Session QA mart (full rebuild each run):
+
+  - For current year: count distinct event_days per session.
+  - Flag is_broken = TRUE if a session appears on > 1 export day.
+*/
+
+WITH base AS (
+  SELECT
+    CONCAT(
+      user_pseudo_id, '-',
+      CAST(
+        (SELECT value.int_value
+         FROM UNNEST(event_params)
+         WHERE key = 'ga_session_id') AS STRING
+      )
+    ) AS session_id,
+    PARSE_DATE('%Y%m%d', _TABLE_SUFFIX) AS event_day
+  FROM `hotspawn-440312.analytics_457395054.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN
+    FORMAT_DATE('%Y%m%d', DATE_TRUNC(CURRENT_DATE(), YEAR))
+    AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
+    AND (SELECT value.int_value
+         FROM UNNEST(event_params)
+         WHERE key = 'ga_session_id') IS NOT NULL
+)
+
+SELECT
+  session_id,
+  COUNT(DISTINCT event_day) AS event_days,
+  COUNT(DISTINCT event_day) > 1 AS is_broken
+FROM base
+GROUP BY session_id

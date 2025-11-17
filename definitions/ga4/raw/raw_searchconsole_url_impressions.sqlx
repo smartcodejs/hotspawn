@@ -1,0 +1,17 @@
+config {
+  type: "view",
+  schema: "searchconsole",
+  name: "raw_searchconsole_url_impressions",
+  tags: ["raw", "seo"]
+}
+
+/*
+  RAW Search Console layer.
+  - Simple passthrough of the base table.
+  - Date windowing (Jan 1 -> today) is applied in int_seo_agg_daily.sqlx
+    and mart_seo_results.sqlx, not here.
+*/
+SELECT
+  *
+FROM
+  `hotspawn-440312.searchconsole.searchdata_url_impression`

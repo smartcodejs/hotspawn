@@ -1,0 +1,27 @@
+config {
+  type: "view",
+  tags: ["intermediate", "seo"]
+}
+
+/*
+  SEO aggregation:
+  - limit to Jan 1 of current year → today
+  - derive Theme_category & Page_category from URL
+  - aggregate Impressions/Clicks per {date, url, device, country, search_type}
+*/
+
+SELECT
+  data_date AS Date,
+  country   AS Country,
+  device    AS Device,
+  url       AS Page_URL,
+  IFNULL(REGEXP_EXTRACT(url, r'^https?://[^/]+/([^/]+)/'), 'home') AS Theme_category,
+  IFNULL(REGEXP_EXTRACT(url, r'^https?://[^/]+/[^/]+/([^/]+)/'), 'none') AS Page_category,
+  search_type AS Search_type,
+  SUM(impressions) AS Impressions,
+  SUM(clicks)      AS Clicks
+FROM ${ref("raw_searchconsole_url_impressions")}
+WHERE data_date BETWEEN
+  DATE_TRUNC(CURRENT_DATE(), YEAR) AND CURRENT_DATE()
+GROUP BY
+  Date, Country, Device, Page_URL, Theme_category, Page_category, Search_type

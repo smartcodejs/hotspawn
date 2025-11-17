@@ -1,0 +1,17 @@
+config {
+  type: "view",
+  tags: ["intermediate", "qa", "ga4"]
+}
+
+/*
+  Simple base for QA:
+  - event_days per session (Jan 1 -> today).
+  Used for quick checks or additional dashboards.
+*/
+
+SELECT
+  session_id,
+  COUNT(DISTINCT event_day) AS event_days
+FROM ${ref("raw_events_session_keys")}
+WHERE event_day BETWEEN DATE_TRUNC(CURRENT_DATE(), YEAR) AND CURRENT_DATE()
+GROUP BY session_id

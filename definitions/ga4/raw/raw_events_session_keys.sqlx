@@ -1,0 +1,16 @@
+config {
+  type: "view",
+  schema: "analytics_457395054",
+  name: "raw_events_session_keys",
+  tags: ["raw","ga4","qa"]
+}
+
+/* Session id + export day for QA flags; year-windowing is done in INT/MART. */
+SELECT
+  CONCAT(
+    user_pseudo_id, '-',
+    CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+  ) AS session_id,
+  PARSE_DATE('%Y%m%d', _TABLE_SUFFIX) AS event_day
+FROM `hotspawn-440312.analytics_457395054.events_*`
+WHERE (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') IS NOT NULL

@@ -1,0 +1,19 @@
+config {
+  type: "view",
+  schema: "analytics_457395054",
+  name: "raw_ads_events",
+  tags: ["raw","ga4","ads"]
+}
+
+/* Thin projection; filtering/windowing happens downstream. */
+SELECT
+  event_timestamp,
+  event_name,
+  geo,
+  device,
+  platform,
+  user_pseudo_id,
+  event_params,
+  _TABLE_SUFFIX AS export_suffix
+FROM `hotspawn-440312.analytics_457395054.events_*`
+WHERE event_name IN ('banner_impression','banner_click')
