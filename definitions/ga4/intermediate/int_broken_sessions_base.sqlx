@@ -1,12 +1,11 @@
 config {
   type: "view",
+  schema: dataform.projectConfig.vars.schema,
   tags: ["intermediate", "qa", "ga4"]
 }
 
 /*
-  Simple base for QA:
-  - event_days per session (Jan 1 -> today).
-  Used for quick checks or additional dashboards.
+  Event-day count per session for the current year.
 */
 
 SELECT

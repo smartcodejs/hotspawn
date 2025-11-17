@@ -1,15 +1,15 @@
 config {
   type: "view",
+  schema: dataform.projectConfig.vars.schema,
   tags: ["intermediate", "ads", "ga4"]
 }
 
 /*
-  Ads logic:
+  Ads logic (current year only):
   - derive session_id, placement_id, advertiser_name
-  - resolve missing advertiser per session + placement
-  - assign human-readable placement label
-  - derive page_category & theme_category from URL
-  - restrict to current year (Jan 1 -> today)
+  - resolve advertiser per session+placement
+  - assign placement label
+  - derive page_category / theme_category from URL
 */
 
 WITH events_ytd AS (
@@ -29,7 +29,6 @@ WITH events_ytd AS (
       )
     ) AS session_id,
 
-    -- page URL
     COALESCE(
       (SELECT ep.value.string_value
        FROM UNNEST(e.event_params) ep
@@ -41,7 +40,6 @@ WITH events_ytd AS (
        LIMIT 1)
     ) AS page_url,
 
-    -- ad tag fields
     (SELECT ep.value.string_value
      FROM UNNEST(e.event_params) ep
      WHERE ep.key = 'banner_class'
@@ -57,7 +55,6 @@ WITH events_ytd AS (
      WHERE ep.key = 'advertiser_name'
      LIMIT 1) AS advertiser_name,
 
-    -- placement id from banner_id or from banner_class (plc909046 -> 909046)
     COALESCE(
       CAST(
         (SELECT ep.value.int_value
@@ -80,7 +77,6 @@ WITH events_ytd AS (
 
     e.event_name,
 
-    -- content structure from URL
     COALESCE(
       NULLIF(SPLIT(REGEXP_EXTRACT(
         COALESCE(
@@ -120,7 +116,6 @@ WITH events_ytd AS (
     AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
 ),
 
--- resolve advertiser within session + placement
 resolved AS (
   SELECT
     *,
@@ -130,7 +125,6 @@ resolved AS (
   FROM events_ytd
 ),
 
--- assign human-readable placement label
 with_placement AS (
   SELECT
     *,

@@ -1,13 +1,11 @@
 config {
   type: "view",
+  schema: dataform.projectConfig.vars.schema,
   tags: ["intermediate", "seo"]
 }
 
 /*
-  SEO aggregation:
-  - limit to Jan 1 of current year → today
-  - derive Theme_category & Page_category from URL
-  - aggregate Impressions/Clicks per {date, url, device, country, search_type}
+  SEO daily aggregation for current year.
 */
 
 SELECT

@@ -6,11 +6,10 @@ config {
 }
 
 /*
-  RAW Search Console layer.
-  - Simple passthrough of the base table.
-  - Date windowing (Jan 1 -> today) is applied in int_seo_agg_daily.sqlx
-    and mart_seo_results.sqlx, not here.
+  Raw Search Console URL impressions.
+  Date windowing is done in the intermediate/mart layer.
 */
+
 SELECT
   *
 FROM

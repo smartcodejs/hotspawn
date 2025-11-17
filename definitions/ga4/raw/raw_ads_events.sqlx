@@ -1,11 +1,14 @@
 config {
   type: "view",
-  schema: "analytics_457395054",
+  schema: dataform.projectConfig.vars.schema,
   name: "raw_ads_events",
-  tags: ["raw","ga4","ads"]
+  tags: ["raw", "ga4", "ads"]
 }
 
-/* Thin projection; filtering/windowing happens downstream. */
+/*
+  GA4 raw events restricted to ad impressions & clicks.
+*/
+
 SELECT
   event_timestamp,
   event_name,
@@ -17,3 +20,4 @@ SELECT
   _TABLE_SUFFIX AS export_suffix
 FROM `hotspawn-440312.analytics_457395054.events_*`
 WHERE event_name IN ('banner_impression','banner_click')
+
