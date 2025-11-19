@@ -1,0 +1,26 @@
+config {
+  type: "view",
+  schema: dataform.projectConfig.vars.schema,
+  name: "raw_cookiebot_daily_stats",
+  tags: ["ga4", "raw", "cookiebot", "consent"]
+}
+
+/*
+  Raw wrapper for Cookiebot daily_stats.
+
+  Source is maintained by backfill.py + Cloud Scheduler.
+  We only read; Dataform never writes to the source dataset.
+*/
+
+SELECT
+  Domain,
+  Date,
+  OptIn,
+  OptOut,
+  OptInImplied,
+  OptInStrict,
+  OptInPref,
+  OptInStat,
+  OptInMark,
+  CountryCounts            -- JSON array as STRING
+FROM `hotspawn-440312.cookiebot_consent.daily_stats`

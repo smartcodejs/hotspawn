@@ -1,0 +1,53 @@
+config {
+  type: "view",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4", "intermediate", "cookiebot", "consent"]
+}
+
+/*
+  Intermediate: explode CountryCounts JSON.
+
+  Input: one row per (Domain, Date) with CountryCounts STRING like:
+    [
+      {"Code":"pl","Count":"3"},
+      {"Code":"sa","Count":"1"},
+      ...
+    ]
+
+  Output: one row per (Domain, Date, country_code):
+    - keeps all daily_stats metrics
+    - adds country_code + country_count
+*/
+
+WITH exploded AS (
+  SELECT
+    ds.Domain,
+    ds.Date,
+
+    ds.OptIn,
+    ds.OptOut,
+    ds.OptInImplied,
+    ds.OptInStrict,
+    ds.OptInPref,
+    ds.OptInStat,
+    ds.OptInMark,
+
+    JSON_EXTRACT_SCALAR(cc, '$.Code')  AS country_code,
+    CAST(JSON_EXTRACT_SCALAR(cc, '$.Count') AS INT64) AS country_count
+  FROM ${ref("raw_cookiebot_daily_stats")} ds
+  CROSS JOIN UNNEST(JSON_EXTRACT_ARRAY(ds.CountryCounts, '$')) AS cc
+)
+
+SELECT
+  Domain,
+  Date,
+  OptIn,
+  OptOut,
+  OptInImplied,
+  OptInStrict,
+  OptInPref,
+  OptInStat,
+  OptInMark,
+  UPPER(country_code) AS country_code,
+  country_count
+FROM exploded

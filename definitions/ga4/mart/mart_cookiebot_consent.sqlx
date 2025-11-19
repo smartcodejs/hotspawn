@@ -1,0 +1,40 @@
+config {
+  type: "view",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4", "mart", "cookiebot", "consent"]
+}
+
+/*
+  Mart: Cookiebot consent with country breakdown.
+
+  Grain:
+    - one row per Date, Domain, country_code
+
+  Contains:
+    - all core consent counters (OptIn, OptOut, ...)
+    - per-country user_count (country_count)
+    - explicit_total         = OptIn + OptOut
+    - explicit_consent_rate  = OptIn / (OptIn + OptOut)
+*/
+
+SELECT
+  Domain,
+  Date,
+
+  -- original consent metrics (same on every country row for that date/domain)
+  OptIn,
+  OptOut,
+  OptInImplied,
+  OptInStrict,
+  OptInPref,
+  OptInStat,
+  OptInMark,
+
+  -- country breakdown from CountryCounts
+  country_code,
+  country_count,
+
+  -- derived KPIs
+  (OptIn + OptOut) AS explicit_total,
+  SAFE_DIVIDE(OptIn, OptIn + OptOut) AS explicit_consent_rate
+FROM ${ref("int_cookiebot_country_counts")}
