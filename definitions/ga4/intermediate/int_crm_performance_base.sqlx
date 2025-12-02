@@ -1,0 +1,125 @@
+config {
+  type: "view",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4", "intermediate", "crm"]
+}
+
+/*
+  Base CRM performance view at delivery_id grain.
+
+  This reproduces your original query (without partition/cluster).
+  The mart will sit on top and handle partitioning + incrementality.
+*/
+
+WITH latest_user_pseudo_id AS (
+  SELECT
+    internal_customer_id,
+    SAFE_CAST(attribute_value AS STRING) AS user_pseudo_id
+  FROM (
+    SELECT
+      internal_customer_id,
+      attribute_value,
+      ROW_NUMBER() OVER (
+        PARTITION BY internal_customer_id
+        ORDER BY timestamp DESC
+      ) AS rn
+    FROM `hotspawn-440312.customer_io.attributes_v5`
+    WHERE attribute_name = 'user_pseudo_id'
+  )
+  WHERE rn = 1
+),
+
+ga4_user_country AS (
+  SELECT
+    user_pseudo_id,
+    country        -- <== adjust if different
+  FROM `hotspawn-440312.analytics_457395054.user_profile_data_table`
+),
+
+country_per_internal_id AS (
+  SELECT
+    lup.internal_customer_id,
+    guc.country
+  FROM latest_user_pseudo_id AS lup
+  LEFT JOIN ga4_user_country AS guc
+    ON lup.user_pseudo_id = guc.user_pseudo_id
+),
+
+deliveries_enriched AS (
+  SELECT
+    d.delivery_id,
+    d.internal_customer_id,
+    d.delivery_type,
+    d.campaign_id,
+    d.action_id,
+    d.newsletter_id,
+    d.transactional_message_id,
+
+    CASE
+      WHEN d.transactional_message_id IS NOT NULL THEN 'Transactional'
+      WHEN d.newsletter_id IS NOT NULL             THEN 'Broadcast'
+      WHEN d.campaign_id IS NOT NULL               THEN 'Campaign'
+      ELSE 'Other'
+    END AS email_type,
+
+    COALESCE(c.name, b.name) AS campaign_name,
+    ca.name                  AS email_name
+
+  FROM `hotspawn-440312.customer_io.deliveries_v5` AS d
+  LEFT JOIN `hotspawn-440312.customer_io.campaigns_v5` AS c
+    ON d.campaign_id = c.campaign_id
+  LEFT JOIN `hotspawn-440312.customer_io.broadcasts_v5` AS b
+    ON d.newsletter_id = b.broadcast_id
+  LEFT JOIN `hotspawn-440312.customer_io.campaign_actions` AS ca
+    ON d.campaign_id = ca.campaign_id
+   AND d.action_id   = ca.action_id
+  WHERE d.delivery_type = 'email'
+),
+
+delivery_subject AS (
+  SELECT
+    delivery_id,
+    subject AS subject_line
+  FROM `hotspawn-440312.customer_io.delivery_contents`
+  WHERE type = 'email'
+)
+
+SELECT
+  d.delivery_id,
+  m.email_client,
+
+  -- Country stitched via user_pseudo_id -> user_profile_data_table
+  cpi.country,
+
+  d.email_type,
+  d.campaign_name,
+  d.email_name,
+  s.subject_line,
+
+  m.sent,
+  m.sent_datetime,
+  m.sent_reason,
+
+  m.delivered,
+  m.delivered_datetime,
+  m.delivered_reason,
+
+  m.opened,
+  m.opened_datetime,
+  m.opened_reason,
+
+  m.clicked,
+  m.clicked_datetime,
+  m.clicked_reason,
+
+  m.bounced,
+  m.bounced_datetime,
+  m.bounced_reason
+
+FROM deliveries_enriched d
+LEFT JOIN ${ref("raw_crm_metrics_per_delivery")} m
+  ON d.delivery_id = m.delivery_id
+LEFT JOIN delivery_subject s
+  ON d.delivery_id = s.delivery_id
+LEFT JOIN country_per_internal_id cpi
+  ON d.internal_customer_id = cpi.internal_customer_id

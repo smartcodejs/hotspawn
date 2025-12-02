@@ -1,0 +1,51 @@
+config {
+  type: "view",
+  schema: dataform.projectConfig.vars.schema,
+  name: "raw_crm_metrics_per_delivery",
+  tags: ["ga4", "raw", "crm"]
+}
+
+/*
+  One row per delivery_id with all key metrics pre-aggregated.
+
+  This is the same logic as your original metrics_per_delivery CTE.
+*/
+
+SELECT
+  delivery_id,
+
+  -- Email client (any non-null for main metrics)
+  MAX(
+    IF(metric IN ('sent','delivered','opened','clicked'),
+       email_client,
+       NULL)
+  ) AS email_client,
+
+  -- Sent
+  MAX(IF(metric = 'sent', 1, 0))                  AS sent,
+  MIN(IF(metric = 'sent', created_at, NULL))      AS sent_datetime,
+  MAX(IF(metric = 'sent', reason, NULL))          AS sent_reason,
+
+  -- Delivered
+  MAX(IF(metric = 'delivered', 1, 0))             AS delivered,
+  MIN(IF(metric = 'delivered', created_at, NULL)) AS delivered_datetime,
+  MAX(IF(metric = 'delivered', reason, NULL))     AS delivered_reason,
+
+  -- Opened
+  MAX(IF(metric = 'opened', 1, 0))                AS opened,
+  MIN(IF(metric = 'opened', created_at, NULL))    AS opened_datetime,
+  MAX(IF(metric = 'opened', reason, NULL))        AS opened_reason,
+
+  -- Clicked
+  MAX(IF(metric = 'clicked', 1, 0))               AS clicked,
+  MIN(IF(metric = 'clicked', created_at, NULL))   AS clicked_datetime,
+  MAX(IF(metric = 'clicked', reason, NULL))       AS clicked_reason,
+
+  -- Bounced
+  MAX(IF(metric = 'bounced', 1, 0))               AS bounced,
+  MIN(IF(metric = 'bounced', created_at, NULL))   AS bounced_datetime,
+  MAX(IF(metric = 'bounced', reason, NULL))       AS bounced_reason
+
+FROM `hotspawn-440312.customer_io.metrics_v5`
+WHERE delivery_id IS NOT NULL
+GROUP BY delivery_id
