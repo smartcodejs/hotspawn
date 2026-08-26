@@ -1,0 +1,167 @@
+config {
+  type: "view",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4", "raw", "content_interactions"]
+}
+
+SELECT
+  TIMESTAMP_MICROS(event_timestamp) AS event_ts,
+  DATE(TIMESTAMP_MICROS(event_timestamp)) AS event_date,
+
+  event_name,
+  user_pseudo_id,
+
+  -- GA4 session ID
+  (
+    SELECT ep.value.int_value
+    FROM UNNEST(event_params) ep
+    WHERE ep.key = 'ga_session_id'
+  ) AS ga_session_id,
+
+  -- Page URL
+  (
+    SELECT ep.value.string_value
+    FROM UNNEST(event_params) ep
+    WHERE ep.key = 'page_location'
+  ) AS page_url,
+
+  -- Content titles
+  (
+    SELECT ep.value.string_value
+    FROM UNNEST(event_params) ep
+    WHERE ep.key = 'video_title'
+  ) AS video_title,
+
+  (
+    SELECT ep.value.string_value
+    FROM UNNEST(event_params) ep
+    WHERE ep.key = 'gtm.videoTitle'
+  ) AS gtm_video_title,
+
+  (
+    SELECT ep.value.string_value
+    FROM UNNEST(event_params) ep
+    WHERE ep.key = 'post_title'
+  ) AS post_title,
+
+  (
+    SELECT ep.value.string_value
+    FROM UNNEST(event_params) ep
+    WHERE ep.key = 'page_title'
+  ) AS page_title,
+
+  -- Video progress
+  COALESCE(
+    (
+      SELECT ep.value.int_value
+      FROM UNNEST(event_params) ep
+      WHERE ep.key = 'video_percent'
+    ),
+    SAFE_CAST(
+      (
+        SELECT ep.value.string_value
+        FROM UNNEST(event_params) ep
+        WHERE ep.key = 'video_percent'
+      ) AS INT64
+    ),
+    (
+      SELECT ep.value.int_value
+      FROM UNNEST(event_params) ep
+      WHERE ep.key = 'percentage_watched'
+    ),
+    SAFE_CAST(
+      (
+        SELECT ep.value.string_value
+        FROM UNNEST(event_params) ep
+        WHERE ep.key = 'percentage_watched'
+      ) AS INT64
+    )
+  ) AS percent_watched,
+
+  -- Post interaction
+  LOWER(
+    (
+      SELECT ep.value.string_value
+      FROM UNNEST(event_params) ep
+      WHERE ep.key = 'interaction_type'
+    )
+  ) AS interaction_type,
+
+  -- Comment/article identifiers
+  COALESCE(
+    (
+      SELECT ep.value.string_value
+      FROM UNNEST(event_params) ep
+      WHERE ep.key = 'article_id'
+    ),
+    CAST(
+      (
+        SELECT ep.value.int_value
+        FROM UNNEST(event_params) ep
+        WHERE ep.key = 'article_id'
+      ) AS STRING
+    )
+  ) AS article_id,
+
+  COALESCE(
+    (
+      SELECT ep.value.string_value
+      FROM UNNEST(event_params) ep
+      WHERE ep.key = 'comment_id'
+    ),
+    CAST(
+      (
+        SELECT ep.value.int_value
+        FROM UNNEST(event_params) ep
+        WHERE ep.key = 'comment_id'
+      ) AS STRING
+    )
+  ) AS comment_id,
+
+  LOWER(
+    (
+      SELECT ep.value.string_value
+      FROM UNNEST(event_params) ep
+      WHERE ep.key = 'vote_action'
+    )
+  ) AS vote_action
+
+FROM `hotspawn-440312.analytics_457395054.events_*`
+
+WHERE REGEXP_CONTAINS(_TABLE_SUFFIX, r'^\d{8}$')
+
+  AND _TABLE_SUFFIX BETWEEN
+    FORMAT_DATE(
+      '%Y%m%d',
+      DATE_SUB(
+        CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+        INTERVAL ${dataform.projectConfig.vars.lookback_days}-1 DAY
+      )
+    )
+    AND FORMAT_DATE(
+      '%Y%m%d',
+      CURRENT_DATE('${dataform.projectConfig.vars.tz}')
+    )
+
+  AND event_name IN (
+    'article_view',
+    'video_view',
+    'video_progress',
+    'video_engagement',
+    'post_interaction',
+    'comment_viewed',
+    'comments_module_view',
+    'comment_submitted',
+    'comment_vote',
+    'article_vote',
+    'comment_reported',
+    'comment_cta_clicked',
+    'comments_cta_impression',
+    'comments_cta_click'
+  )
+
+  AND (
+    SELECT ep.value.int_value
+    FROM UNNEST(event_params) ep
+    WHERE ep.key = 'ga_session_id'
+  ) IS NOT NULL
