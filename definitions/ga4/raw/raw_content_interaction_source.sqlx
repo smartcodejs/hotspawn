@@ -148,7 +148,7 @@ WHERE REGEXP_CONTAINS(_TABLE_SUFFIX, r'^\d{8}$')
     '%Y%m%d',
     DATE_SUB(
       refresh_end,
-      INTERVAL (${dataform.projectConfig.vars.lookback_days} - 1) DAY
+INTERVAL ${Number(dataform.projectConfig.vars.lookback_days) - 1} DAY
     )
   )
   AND FORMAT_DATE(
