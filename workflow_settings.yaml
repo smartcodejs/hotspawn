@@ -3,3 +3,9 @@ defaultLocation: EU
 defaultDataset: dataform
 defaultAssertionDataset: dataform_assertions
 dataformCoreVersion: 3.0.0
+
+vars:
+  schema: "ga4_production"
+  lookback_days: "3"
+  tz: "Europe/Bratislava"
+  page_url_exclusions_csv: "cloudwaysapps.com,wordpressmu,staging"

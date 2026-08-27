@@ -1,0 +1,84 @@
+config {
+  type: "incremental",
+  protected: true,
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4", "mart", "content_interactions"],
+  bigquery: {
+    partitionBy: "date",
+    clusterBy: ["user_pseudo_id", "session_id"]
+  }
+}
+
+pre_operations {
+
+  ${when(incremental(), `
+
+    DECLARE refresh_end DATE DEFAULT (
+      SELECT
+        MAX(
+          SAFE.PARSE_DATE(
+            '%Y%m%d',
+            SUBSTR(table_name, 8, 8)
+          )
+        )
+      FROM \`hotspawn-440312.analytics_457395054.INFORMATION_SCHEMA.TABLES\`
+      WHERE STARTS_WITH(table_name, 'events_')
+        AND LENGTH(table_name) = 15
+    );
+
+    DELETE FROM ${self()}
+    WHERE date BETWEEN
+      DATE_SUB(
+        refresh_end,
+        INTERVAL ${Number(dataform.projectConfig.vars.lookback_days) - 1} DAY
+      )
+      AND refresh_end;
+
+  `)}
+
+}
+
+SELECT
+  date,
+  user_pseudo_id,
+  session_id,
+  page_url,
+  content_type,
+  content_title,
+  percent_watched,
+  `like`,
+  dislike,
+  comment,
+  share,
+  page_category,
+  theme_category,
+  comments_module_view,
+  comments_submitted,
+  comment_upvote_add,
+  comment_upvote_remove,
+  article_upvote_add,
+  article_upvote_remove,
+  comments_reported,
+  comments_entrypoint_cta_clicks,
+  comments_cta_impressions,
+  comments_cta_clicks
+
+FROM ${ref("int_content_interactions")}
+
+WHERE
+  COALESCE(percent_watched, 0)
+  + COALESCE(`like`, 0)
+  + COALESCE(dislike, 0)
+  + COALESCE(comment, 0)
+  + COALESCE(share, 0)
+  + COALESCE(comments_module_view, 0)
+  + COALESCE(comments_submitted, 0)
+  + COALESCE(comment_upvote_add, 0)
+  + COALESCE(comment_upvote_remove, 0)
+  + COALESCE(article_upvote_add, 0)
+  + COALESCE(article_upvote_remove, 0)
+  + COALESCE(comments_reported, 0)
+  + COALESCE(comments_entrypoint_cta_clicks, 0)
+  + COALESCE(comments_cta_impressions, 0)
+  + COALESCE(comments_cta_clicks, 0)
+  > 0
