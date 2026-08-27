@@ -1,0 +1,30 @@
+config {
+  type: "table",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4", "mart", "content_interactions"],
+  bigquery: {
+    partitionBy: "date",
+    clusterBy: ["user_pseudo_id", "session_id"]
+  }
+}
+
+SELECT *
+FROM `hotspawn-440312.analytics_457395054.content_interaction_schema_volume_2`
+
+WHERE
+  COALESCE(percent_watched, 0)
+  + COALESCE(`like`, 0)
+  + COALESCE(dislike, 0)
+  + COALESCE(comment, 0)
+  + COALESCE(share, 0)
+  + COALESCE(comments_module_view, 0)
+  + COALESCE(comments_submitted, 0)
+  + COALESCE(comment_upvote_add, 0)
+  + COALESCE(comment_upvote_remove, 0)
+  + COALESCE(article_upvote_add, 0)
+  + COALESCE(article_upvote_remove, 0)
+  + COALESCE(comments_reported, 0)
+  + COALESCE(comments_entrypoint_cta_clicks, 0)
+  + COALESCE(comments_cta_impressions, 0)
+  + COALESCE(comments_cta_clicks, 0)
+  > 0

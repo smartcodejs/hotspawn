@@ -1,0 +1,455 @@
+config {
+  type: "view",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4", "intermediate", "content_interactions"]
+}
+
+WITH
+
+theme_mapping_unique AS (
+  SELECT
+    raw_value,
+    MAX(canonical) AS canonical
+  FROM `hotspawn-440312.analytics_457395054.theme_category_mapping`
+  GROUP BY raw_value
+),
+
+video_watch AS (
+  SELECT
+    event_date AS date,
+    user_pseudo_id,
+
+    CONCAT(
+      user_pseudo_id,
+      '-',
+      CAST(ga_session_id AS STRING)
+    ) AS session_id,
+
+    page_url,
+
+    'video' AS content_type,
+
+    COALESCE(
+      NULLIF(video_title, ''),
+      NULLIF(gtm_video_title, ''),
+      NULLIF(post_title, ''),
+      NULLIF(page_title, ''),
+      'unknown'
+    ) AS content_title,
+
+    MAX(COALESCE(percent_watched, 0)) AS percent_watched
+
+  FROM ${ref("raw_content_interaction_source")}
+
+  WHERE event_name IN (
+    'video_view',
+    'video_progress',
+    'video_engagement'
+  )
+
+  GROUP BY
+    date,
+    user_pseudo_id,
+    session_id,
+    page_url,
+    content_type,
+    content_title
+),
+
+article_view AS (
+  SELECT
+    event_date AS date,
+    user_pseudo_id,
+
+    CONCAT(
+      user_pseudo_id,
+      '-',
+      CAST(ga_session_id AS STRING)
+    ) AS session_id,
+
+    page_url,
+
+    'article' AS content_type,
+
+    COALESCE(
+      NULLIF(post_title, ''),
+      NULLIF(page_title, ''),
+      'unknown'
+    ) AS content_title,
+
+    0 AS percent_watched
+
+  FROM ${ref("raw_content_interaction_source")}
+
+  WHERE event_name = 'article_view'
+
+  GROUP BY
+    date,
+    user_pseudo_id,
+    session_id,
+    page_url,
+    content_type,
+    content_title
+),
+
+content_events_base AS (
+  SELECT * FROM video_watch
+
+  UNION ALL
+
+  SELECT * FROM article_view
+),
+
+content_events AS (
+  SELECT
+    *,
+
+    ROW_NUMBER() OVER (
+      PARTITION BY
+        date,
+        user_pseudo_id,
+        session_id,
+        REGEXP_EXTRACT(page_url, r'^([^?#]+)'),
+        content_type
+      ORDER BY content_title
+    ) AS content_row_rank
+
+  FROM content_events_base
+),
+
+interactions AS (
+  SELECT
+    event_date AS date,
+    user_pseudo_id,
+
+    CONCAT(
+      user_pseudo_id,
+      '-',
+      CAST(ga_session_id AS STRING)
+    ) AS session_id,
+
+    page_url,
+
+    COUNTIF(interaction_type = 'like') AS `like`,
+    COUNTIF(interaction_type = 'dislike') AS dislike,
+    COUNTIF(interaction_type = 'comment') AS comment,
+    COUNTIF(interaction_type = 'share') AS share
+
+  FROM ${ref("raw_content_interaction_source")}
+
+  WHERE event_name = 'post_interaction'
+
+  GROUP BY
+    date,
+    user_pseudo_id,
+    session_id,
+    page_url
+),
+
+comments_raw AS (
+  SELECT
+    event_date AS date,
+    event_ts,
+    event_name,
+    user_pseudo_id,
+
+    CONCAT(
+      user_pseudo_id,
+      '-',
+      CAST(ga_session_id AS STRING)
+    ) AS session_id,
+
+    REGEXP_EXTRACT(
+      page_url,
+      r'^([^?#]+)'
+    ) AS clean_page_url,
+
+    article_id,
+    comment_id,
+    vote_action
+
+  FROM ${ref("raw_content_interaction_source")}
+
+  WHERE event_name IN (
+    'comment_viewed',
+    'comments_module_view',
+    'comment_submitted',
+    'comment_vote',
+    'article_vote',
+    'comment_reported',
+    'comment_cta_clicked',
+    'comments_cta_impression',
+    'comments_cta_click'
+  )
+),
+
+comments_dedup AS (
+  SELECT *
+  FROM comments_raw
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY
+      event_ts,
+      event_name,
+      user_pseudo_id,
+      session_id,
+      clean_page_url,
+      article_id,
+      comment_id,
+      vote_action
+    ORDER BY event_ts
+  ) = 1
+),
+
+comments_interactions AS (
+  SELECT
+    date,
+    user_pseudo_id,
+    session_id,
+    clean_page_url,
+
+    MAX(
+      CASE
+        WHEN event_name IN (
+          'comment_viewed',
+          'comments_module_view'
+        )
+        THEN 1
+        ELSE 0
+      END
+    ) AS comments_module_view,
+
+    COUNTIF(
+      event_name = 'comment_submitted'
+    ) AS comments_submitted,
+
+    COUNTIF(
+      event_name = 'comment_vote'
+      AND vote_action = 'add'
+    ) AS comment_upvote_add,
+
+    COUNTIF(
+      event_name = 'comment_vote'
+      AND vote_action = 'remove'
+    ) AS comment_upvote_remove,
+
+    COUNTIF(
+      event_name = 'article_vote'
+      AND vote_action = 'add'
+    ) AS article_upvote_add,
+
+    COUNTIF(
+      event_name = 'article_vote'
+      AND vote_action = 'remove'
+    ) AS article_upvote_remove,
+
+    COUNTIF(
+      event_name = 'comment_reported'
+    ) AS comments_reported,
+
+    COUNTIF(
+      event_name = 'comment_cta_clicked'
+    ) AS comments_entrypoint_cta_clicks,
+
+    COUNTIF(
+      event_name = 'comments_cta_impression'
+    ) AS comments_cta_impressions,
+
+    COUNTIF(
+      event_name = 'comments_cta_click'
+    ) AS comments_cta_clicks
+
+  FROM comments_dedup
+
+  GROUP BY
+    date,
+    user_pseudo_id,
+    session_id,
+    clean_page_url
+),
+
+taxonomy AS (
+  SELECT
+    REGEXP_EXTRACT(
+      page_location,
+      r'^([^?#]+)'
+    ) AS clean_page_url,
+
+    ARRAY_AGG(
+      STRUCT(
+        page_category,
+        theme_category
+      )
+      ORDER BY event_timestamp DESC
+      LIMIT 1
+    )[OFFSET(0)] AS t
+
+  FROM `hotspawn-440312.analytics_457395054.page_taxonomy_volume_2`
+
+  GROUP BY clean_page_url
+)
+
+SELECT
+  ce.date,
+  ce.user_pseudo_id,
+  ce.session_id,
+  ce.page_url,
+  ce.content_type,
+  ce.content_title,
+  ce.percent_watched,
+
+  COALESCE(i.`like`, 0) AS `like`,
+  COALESCE(i.dislike, 0) AS dislike,
+  COALESCE(i.comment, 0) AS comment,
+  COALESCE(i.share, 0) AS share,
+
+  CASE LOWER(
+    COALESCE(
+      tx.t.page_category,
+      REGEXP_EXTRACT(
+        ce.page_url,
+        r'hotspawn\.com/[^/]+/([^/?#]+)/'
+      )
+    )
+  )
+    WHEN 'news'        THEN 'News'
+    WHEN 'guide'       THEN 'Guide'
+    WHEN 'guides'      THEN 'Guide'
+    WHEN 'tournament'  THEN 'Tournament'
+    WHEN 'tournaments' THEN 'Tournament'
+    WHEN 'team'        THEN 'Team'
+    WHEN 'teams'       THEN 'Team'
+    WHEN 'player'      THEN 'Player'
+    WHEN 'players'     THEN 'Player'
+    WHEN 'match'       THEN 'Match'
+    WHEN 'matches'     THEN 'Match'
+    WHEN 'podcast'     THEN 'Podcast'
+    WHEN 'home'        THEN 'Home'
+    WHEN 'other'       THEN 'Other'
+    ELSE NULL
+  END AS page_category,
+
+  CASE
+    WHEN tx.t.theme_category IS NOT NULL
+      AND m.raw_value IS NOT NULL
+      AND m.canonical IS NOT NULL
+      THEN m.canonical
+
+    WHEN tx.t.theme_category IS NOT NULL
+      AND m.raw_value IS NULL
+      THEN tx.t.theme_category
+
+    WHEN tx.t.theme_category IS NOT NULL
+      AND m.canonical IS NULL
+      AND m_url.canonical IS NOT NULL
+      THEN m_url.canonical
+
+    WHEN tx.t.theme_category IS NULL
+      AND m_url.canonical IS NOT NULL
+      THEN m_url.canonical
+
+    ELSE NULL
+  END AS theme_category,
+
+  CASE
+    WHEN ce.content_type = 'article'
+      AND ce.content_row_rank = 1
+    THEN COALESCE(cu.comments_module_view, 0)
+    ELSE 0
+  END AS comments_module_view,
+
+  CASE
+    WHEN ce.content_type = 'article'
+      AND ce.content_row_rank = 1
+    THEN COALESCE(cu.comments_submitted, 0)
+    ELSE 0
+  END AS comments_submitted,
+
+  CASE
+    WHEN ce.content_type = 'article'
+      AND ce.content_row_rank = 1
+    THEN COALESCE(cu.comment_upvote_add, 0)
+    ELSE 0
+  END AS comment_upvote_add,
+
+  CASE
+    WHEN ce.content_type = 'article'
+      AND ce.content_row_rank = 1
+    THEN COALESCE(cu.comment_upvote_remove, 0)
+    ELSE 0
+  END AS comment_upvote_remove,
+
+  CASE
+    WHEN ce.content_type = 'article'
+      AND ce.content_row_rank = 1
+    THEN COALESCE(cu.article_upvote_add, 0)
+    ELSE 0
+  END AS article_upvote_add,
+
+  CASE
+    WHEN ce.content_type = 'article'
+      AND ce.content_row_rank = 1
+    THEN COALESCE(cu.article_upvote_remove, 0)
+    ELSE 0
+  END AS article_upvote_remove,
+
+  CASE
+    WHEN ce.content_type = 'article'
+      AND ce.content_row_rank = 1
+    THEN COALESCE(cu.comments_reported, 0)
+    ELSE 0
+  END AS comments_reported,
+
+  CASE
+    WHEN ce.content_type = 'article'
+      AND ce.content_row_rank = 1
+    THEN COALESCE(cu.comments_entrypoint_cta_clicks, 0)
+    ELSE 0
+  END AS comments_entrypoint_cta_clicks,
+
+  CASE
+    WHEN ce.content_type = 'article'
+      AND ce.content_row_rank = 1
+    THEN COALESCE(cu.comments_cta_impressions, 0)
+    ELSE 0
+  END AS comments_cta_impressions,
+
+  CASE
+    WHEN ce.content_type = 'article'
+      AND ce.content_row_rank = 1
+    THEN COALESCE(cu.comments_cta_clicks, 0)
+    ELSE 0
+  END AS comments_cta_clicks
+
+FROM content_events ce
+
+LEFT JOIN interactions i
+  ON ce.date = i.date
+  AND ce.user_pseudo_id = i.user_pseudo_id
+  AND ce.session_id = i.session_id
+  AND ce.page_url = i.page_url
+
+LEFT JOIN comments_interactions cu
+  ON ce.content_type = 'article'
+  AND ce.date = cu.date
+  AND ce.user_pseudo_id = cu.user_pseudo_id
+  AND ce.session_id = cu.session_id
+  AND REGEXP_EXTRACT(
+        ce.page_url,
+        r'^([^?#]+)'
+      ) = cu.clean_page_url
+
+LEFT JOIN taxonomy tx
+  ON REGEXP_EXTRACT(
+       ce.page_url,
+       r'^([^?#]+)'
+     ) = tx.clean_page_url
+
+LEFT JOIN theme_mapping_unique m
+  ON tx.t.theme_category = m.raw_value
+
+LEFT JOIN theme_mapping_unique m_url
+  ON REGEXP_EXTRACT(
+       ce.page_url,
+       r'hotspawn\.com/([^/]+)/'
+     ) = m_url.raw_value
