@@ -1,0 +1,79 @@
+config {
+  type: "view",
+  tags: ["registration", "staging", "newsletter"]
+}
+
+WITH source_rows AS (
+
+  SELECT
+    signup_date,
+    user_pseudo_id,
+    acquisition_channel,
+    acquisition_source,
+    country,
+    device_type,
+    total_sessions
+
+  FROM ${ref("user_signup_schema")}
+
+  WHERE newsletter_signup_event = 1
+),
+
+deduped AS (
+
+  SELECT *
+  FROM source_rows
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY
+      signup_date,
+      user_pseudo_id
+    ORDER BY signup_date
+  ) = 1
+)
+
+SELECT
+
+  TO_HEX(
+    SHA256(
+      CONCAT(
+        'newsletter|',
+        CAST(signup_date AS STRING),
+        '|',
+        COALESCE(user_pseudo_id, 'no_pseudo_id')
+      )
+    )
+  ) AS registration_id,
+
+  signup_date AS registration_date,
+
+  CAST(NULL AS TIMESTAMP) AS registration_timestamp,
+
+  'newsletter' AS registration_type,
+
+  'hotspawn' AS source_system,
+
+  'analytics_457395054.user_signup_schema' AS source_table,
+
+  'newsletter_signup' AS source_event,
+
+  user_pseudo_id,
+
+  'success' AS registration_status,
+
+  CAST(NULL AS STRING) AS source_signup_status,
+
+  CAST(NULL AS STRING) AS signup_method,
+  CAST(NULL AS STRING) AS signup_provider,
+
+  acquisition_channel,
+  acquisition_source,
+  country,
+  device_type,
+  total_sessions,
+
+  user_pseudo_id IS NOT NULL AS has_user_pseudo_id,
+
+  TRUE AS is_valid_registration
+
+FROM deduped
