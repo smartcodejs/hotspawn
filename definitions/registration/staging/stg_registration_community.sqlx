@@ -1,0 +1,111 @@
+config {
+  type: "view",
+  tags: ["registration", "staging", "community"]
+}
+
+WITH source_rows AS (
+
+  SELECT
+    signup_date,
+    user_pseudo_id,
+    signup_status,
+    signup_method,
+    signup_provider,
+    acquisition_channel,
+    acquisition_source,
+    country,
+    device_type,
+    total_sessions
+
+  FROM ${ref("user_signup_schema")}
+
+  WHERE community_registration = 1
+),
+
+numbered_rows AS (
+
+  SELECT
+    *,
+
+    ROW_NUMBER() OVER (
+      PARTITION BY
+        signup_date,
+        user_pseudo_id,
+        signup_status,
+        signup_method,
+        signup_provider,
+        acquisition_channel,
+        acquisition_source,
+        country,
+        device_type,
+        total_sessions
+
+      ORDER BY signup_date
+    ) AS source_row_number
+
+  FROM source_rows
+)
+
+SELECT
+
+  TO_HEX(
+    SHA256(
+      CONCAT(
+        'community_registration|',
+        CAST(signup_date AS STRING),
+        '|',
+        COALESCE(user_pseudo_id, 'no_pseudo_id'),
+        '|',
+        COALESCE(signup_status, ''),
+        '|',
+        COALESCE(signup_method, ''),
+        '|',
+        COALESCE(signup_provider, ''),
+        '|',
+        COALESCE(acquisition_channel, ''),
+        '|',
+        COALESCE(acquisition_source, ''),
+        '|',
+        COALESCE(country, ''),
+        '|',
+        COALESCE(device_type, ''),
+        '|',
+        CAST(COALESCE(total_sessions, 0) AS STRING),
+        '|',
+        CAST(source_row_number AS STRING)
+      )
+    )
+  ) AS registration_id,
+
+  signup_date AS registration_date,
+
+  CAST(NULL AS TIMESTAMP) AS registration_timestamp,
+
+  'community_registration' AS registration_type,
+
+  'community' AS source_system,
+
+  'analytics_457395054.user_signup_schema' AS source_table,
+
+  'account_created' AS source_event,
+
+  user_pseudo_id,
+
+  'success' AS registration_status,
+
+  signup_status AS source_signup_status,
+
+  signup_method,
+  signup_provider,
+
+  acquisition_channel,
+  acquisition_source,
+  country,
+  device_type,
+  total_sessions,
+
+  user_pseudo_id IS NOT NULL AS has_user_pseudo_id,
+
+  TRUE AS is_valid_registration
+
+FROM numbered_rows
