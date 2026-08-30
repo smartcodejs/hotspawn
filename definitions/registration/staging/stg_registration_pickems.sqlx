@@ -1,0 +1,91 @@
+config {
+  type: "view",
+  tags: ["registration", "staging", "pickems"]
+}
+
+WITH source_rows AS (
+
+  SELECT
+    signup_date,
+    user_pseudo_id,
+    signup_status,
+    signup_method,
+    signup_provider,
+    acquisition_channel,
+    acquisition_source,
+    country,
+    device_type,
+    total_sessions
+
+  FROM ${ref("user_signup_schema")}
+
+  WHERE pickems_signup = 1
+),
+
+deduped AS (
+
+  SELECT *
+  FROM source_rows
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY
+      signup_date,
+      user_pseudo_id
+
+    ORDER BY
+      CASE WHEN signup_status IS NOT NULL THEN 0 ELSE 1 END,
+      CASE WHEN signup_method IS NOT NULL THEN 0 ELSE 1 END,
+      CASE WHEN signup_provider IS NOT NULL THEN 0 ELSE 1 END,
+      signup_method,
+      signup_provider
+  ) = 1
+)
+
+SELECT
+
+  TO_HEX(
+    SHA256(
+      CONCAT(
+        'pickems_registration|',
+        CAST(signup_date AS STRING),
+        '|',
+        COALESCE(user_pseudo_id, 'no_pseudo_id')
+      )
+    )
+  ) AS registration_id,
+
+  signup_date AS registration_date,
+
+  CAST(NULL AS TIMESTAMP) AS registration_timestamp,
+
+  'pickems_registration' AS registration_type,
+
+  'pickems' AS source_system,
+
+  'analytics_457395054.user_signup_schema' AS source_table,
+
+  'user_signup' AS source_event,
+
+  user_pseudo_id,
+
+  CASE
+    WHEN LOWER(signup_status) LIKE 'success%' THEN 'success'
+    ELSE LOWER(signup_status)
+  END AS registration_status,
+
+  signup_status AS source_signup_status,
+
+  signup_method,
+  signup_provider,
+
+  acquisition_channel,
+  acquisition_source,
+  country,
+  device_type,
+  total_sessions,
+
+  user_pseudo_id IS NOT NULL AS has_user_pseudo_id,
+
+  TRUE AS is_valid_registration
+
+FROM deduped
