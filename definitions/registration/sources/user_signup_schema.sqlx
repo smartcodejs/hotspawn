@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  database: "hotspawn-440312",
+  schema: "analytics_457395054",
+  name: "user_signup_schema"
+}
