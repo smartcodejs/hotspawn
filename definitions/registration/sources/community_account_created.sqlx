@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  database: "hotspawn-440312",
+  schema: "hotspawn_community_rudderstack",
+  name: "account_created"
+}
