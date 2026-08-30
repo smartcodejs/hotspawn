@@ -68,10 +68,7 @@ SELECT
 
   user_pseudo_id,
 
-  CASE
-    WHEN LOWER(signup_status) LIKE 'success%' THEN 'success'
-    ELSE LOWER(signup_status)
-  END AS registration_status,
+  'success' AS registration_status,
 
   signup_status AS source_signup_status,
 
