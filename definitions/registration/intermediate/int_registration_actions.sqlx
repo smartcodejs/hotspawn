@@ -1,0 +1,98 @@
+config {
+  type: "view",
+  tags: ["registration", "intermediate"]
+}
+
+SELECT
+  registration_id,
+  registration_date,
+  registration_timestamp,
+  registration_type,
+  source_system,
+  source_table,
+  source_event,
+  user_pseudo_id,
+  registration_status,
+  source_signup_status,
+  signup_method,
+  signup_provider,
+  acquisition_channel,
+  acquisition_source,
+  country,
+  device_type,
+  total_sessions,
+  has_user_pseudo_id,
+  is_valid_registration
+FROM ${ref("stg_registration_personal")}
+
+UNION ALL
+
+SELECT
+  registration_id,
+  registration_date,
+  registration_timestamp,
+  registration_type,
+  source_system,
+  source_table,
+  source_event,
+  user_pseudo_id,
+  registration_status,
+  source_signup_status,
+  signup_method,
+  signup_provider,
+  acquisition_channel,
+  acquisition_source,
+  country,
+  device_type,
+  total_sessions,
+  has_user_pseudo_id,
+  is_valid_registration
+FROM ${ref("stg_registration_pickems")}
+
+UNION ALL
+
+SELECT
+  registration_id,
+  registration_date,
+  registration_timestamp,
+  registration_type,
+  source_system,
+  source_table,
+  source_event,
+  user_pseudo_id,
+  registration_status,
+  source_signup_status,
+  signup_method,
+  signup_provider,
+  acquisition_channel,
+  acquisition_source,
+  country,
+  device_type,
+  total_sessions,
+  has_user_pseudo_id,
+  is_valid_registration
+FROM ${ref("stg_registration_newsletter")}
+
+UNION ALL
+
+SELECT
+  registration_id,
+  registration_date,
+  registration_timestamp,
+  registration_type,
+  source_system,
+  source_table,
+  source_event,
+  user_pseudo_id,
+  registration_status,
+  source_signup_status,
+  signup_method,
+  signup_provider,
+  acquisition_channel,
+  acquisition_source,
+  country,
+  device_type,
+  total_sessions,
+  has_user_pseudo_id,
+  is_valid_registration
+FROM ${ref("stg_registration_community")}
