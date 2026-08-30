@@ -1,0 +1,61 @@
+config {
+  type: "table",
+  tags: ["registration", "mart", "canonical"],
+
+  assertions: {
+    uniqueKey: ["registration_id"],
+    nonNull: [
+      "registration_id",
+      "registration_date",
+      "registration_type",
+      "source_system",
+      "source_table",
+      "source_event",
+      "registration_status"
+    ]
+  },
+
+  bigquery: {
+    partitionBy: "registration_date",
+    clusterBy: ["registration_type", "source_system"]
+  }
+}
+
+SELECT
+  registration_id,
+  registration_date,
+  registration_timestamp,
+  registration_type,
+
+  source_system,
+  source_table,
+  source_event,
+
+  user_pseudo_id,
+
+  registration_status,
+  source_signup_status,
+
+  signup_method,
+  signup_provider,
+
+  acquisition_channel,
+  acquisition_source,
+  country,
+  device_type,
+  total_sessions,
+
+  has_user_pseudo_id,
+
+  CASE
+    WHEN has_user_pseudo_id THEN 'identified'
+    ELSE 'missing_user_pseudo_id'
+  END AS identity_status,
+
+  is_valid_registration,
+
+  CURRENT_TIMESTAMP() AS loaded_at
+
+FROM ${ref("int_registration_actions")}
+
+WHERE is_valid_registration = TRUE
