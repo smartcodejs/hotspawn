@@ -1,0 +1,42 @@
+config {
+  type: "view",
+  tags: ["registration", "customerio", "activation", "community"]
+}
+
+SELECT
+  id AS community_event_id,
+
+  CAST(user_id AS STRING) AS community_user_id,
+
+  NULLIF(LOWER(TRIM(email)), '') AS email,
+
+  -- This value is Community-specific and must NOT be treated
+  -- as a valid GA4 user_pseudo_id historically.
+  user_pseudo_id AS community_source_identity,
+
+  COALESCE(
+    timestamp,
+    original_timestamp,
+    received_at
+  ) AS registration_timestamp,
+
+  DATE(
+    COALESCE(
+      timestamp,
+      original_timestamp,
+      received_at
+    )
+  ) AS registration_date,
+
+  'KNOWN_EMAIL_ONLY' AS cio_identity_state,
+
+  TRUE AS cio_activation_ready,
+
+  'HISTORICAL_COMMUNITY_NON_GA4_PSEUDO_ID'
+    AS identity_quality_status
+
+FROM `hotspawn-440312.hotspawn_community_rudderstack.account_created`
+
+WHERE env = 'prod'
+  AND source = 'backend'
+  AND event = 'account_created'
