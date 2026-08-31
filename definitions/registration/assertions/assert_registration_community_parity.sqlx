@@ -1,0 +1,71 @@
+config {
+  type: "assertion",
+  tags: ["registration", "dq", "parity", "community"]
+}
+
+WITH native AS (
+
+  SELECT
+    TO_HEX(
+      SHA256(
+        CONCAT(
+          'community_registration|',
+          CAST(id AS STRING)
+        )
+      )
+    ) AS source_registration_id,
+
+    DATE(
+      COALESCE(
+        timestamp,
+        original_timestamp,
+        received_at
+      )
+    ) AS source_registration_date
+
+  FROM `hotspawn-440312.hotspawn_community_rudderstack.account_created`
+
+  WHERE source = 'backend'
+    AND event = 'account_created'
+    AND (
+      env = 'prod'
+      OR env IS NULL
+      OR TRIM(env) = ''
+    )
+),
+
+canonical AS (
+
+  SELECT
+    registration_id AS canonical_registration_id,
+    registration_date AS canonical_registration_date
+
+  FROM ${ref("fact_registrations")}
+
+  WHERE registration_type = 'community_registration'
+)
+
+SELECT
+  n.source_registration_id,
+  c.canonical_registration_id,
+  n.source_registration_date,
+  c.canonical_registration_date,
+
+  CASE
+    WHEN n.source_registration_id IS NULL
+      THEN 'CANONICAL_ONLY'
+    WHEN c.canonical_registration_id IS NULL
+      THEN 'SOURCE_ONLY'
+    WHEN n.source_registration_date != c.canonical_registration_date
+      THEN 'DATE_MISMATCH'
+  END AS parity_issue
+
+FROM native n
+
+FULL OUTER JOIN canonical c
+  ON n.source_registration_id = c.canonical_registration_id
+
+WHERE
+  n.source_registration_id IS NULL
+  OR c.canonical_registration_id IS NULL
+  OR n.source_registration_date != c.canonical_registration_date
