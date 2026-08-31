@@ -37,6 +37,10 @@ SELECT
 
 FROM `hotspawn-440312.hotspawn_community_rudderstack.account_created`
 
-WHERE env = 'prod'
-  AND source = 'backend'
+WHERE source = 'backend'
   AND event = 'account_created'
+  AND (
+    env = 'prod'
+    OR env IS NULL
+    OR TRIM(env) = ''
+  )
