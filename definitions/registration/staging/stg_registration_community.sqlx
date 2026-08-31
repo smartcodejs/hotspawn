@@ -6,44 +6,25 @@ config {
 WITH source_rows AS (
 
   SELECT
-    signup_date,
-    user_pseudo_id,
-    signup_status,
-    signup_method,
-    signup_provider,
-    acquisition_channel,
-    acquisition_source,
-    country,
-    device_type,
-    total_sessions
+    id AS community_event_id,
 
-  FROM ${ref("user_signup_schema")}
+    COALESCE(
+      timestamp,
+      original_timestamp,
+      received_at
+    ) AS registration_timestamp,
 
-  WHERE community_registration = 1
-),
+    NULLIF(TRIM(user_pseudo_id), '') AS source_user_pseudo_id
 
-numbered_rows AS (
+  FROM `hotspawn-440312.hotspawn_community_rudderstack.account_created`
 
-  SELECT
-    *,
-
-    ROW_NUMBER() OVER (
-      PARTITION BY
-        signup_date,
-        user_pseudo_id,
-        signup_status,
-        signup_method,
-        signup_provider,
-        acquisition_channel,
-        acquisition_source,
-        country,
-        device_type,
-        total_sessions
-
-      ORDER BY signup_date
-    ) AS source_row_number
-
-  FROM source_rows
+  WHERE source = 'backend'
+    AND event = 'account_created'
+    AND (
+      env = 'prod'
+      OR env IS NULL
+      OR TRIM(env) = ''
+    )
 )
 
 SELECT
@@ -52,60 +33,48 @@ SELECT
     SHA256(
       CONCAT(
         'community_registration|',
-        CAST(signup_date AS STRING),
-        '|',
-        COALESCE(user_pseudo_id, 'no_pseudo_id'),
-        '|',
-        COALESCE(signup_status, ''),
-        '|',
-        COALESCE(signup_method, ''),
-        '|',
-        COALESCE(signup_provider, ''),
-        '|',
-        COALESCE(acquisition_channel, ''),
-        '|',
-        COALESCE(acquisition_source, ''),
-        '|',
-        COALESCE(country, ''),
-        '|',
-        COALESCE(device_type, ''),
-        '|',
-        CAST(COALESCE(total_sessions, 0) AS STRING),
-        '|',
-        CAST(source_row_number AS STRING)
+        CAST(community_event_id AS STRING)
       )
     )
   ) AS registration_id,
 
-  signup_date AS registration_date,
+  DATE(registration_timestamp) AS registration_date,
 
-  CAST(NULL AS TIMESTAMP) AS registration_timestamp,
+  registration_timestamp,
 
   'community_registration' AS registration_type,
 
   'community' AS source_system,
 
-  'analytics_457395054.user_signup_schema' AS source_table,
+  'hotspawn_community_rudderstack.account_created' AS source_table,
 
   'account_created' AS source_event,
 
-  user_pseudo_id,
+  CASE
+    WHEN source_user_pseudo_id LIKE 'user-%'
+      THEN NULL
+    ELSE source_user_pseudo_id
+  END AS user_pseudo_id,
 
   'success' AS registration_status,
 
-  signup_status AS source_signup_status,
+  CAST(NULL AS STRING) AS source_signup_status,
 
-  signup_method,
-  signup_provider,
+  CAST(NULL AS STRING) AS signup_method,
+  CAST(NULL AS STRING) AS signup_provider,
 
-  acquisition_channel,
-  acquisition_source,
-  country,
-  device_type,
-  total_sessions,
+  CAST(NULL AS STRING) AS acquisition_channel,
+  CAST(NULL AS STRING) AS acquisition_source,
+  CAST(NULL AS STRING) AS country,
+  CAST(NULL AS STRING) AS device_type,
+  CAST(NULL AS INT64) AS total_sessions,
 
-  user_pseudo_id IS NOT NULL AS has_user_pseudo_id,
+  CASE
+    WHEN source_user_pseudo_id IS NULL THEN FALSE
+    WHEN source_user_pseudo_id LIKE 'user-%' THEN FALSE
+    ELSE TRUE
+  END AS has_user_pseudo_id,
 
   TRUE AS is_valid_registration
 
-FROM numbered_rows
+FROM source_rows
