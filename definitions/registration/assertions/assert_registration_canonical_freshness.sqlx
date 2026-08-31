@@ -1,0 +1,63 @@
+config {
+  type: "assertion",
+  tags: ["registration", "dq", "freshness"]
+}
+
+WITH staging_freshness AS (
+
+  SELECT
+    'personal_registration' AS registration_type,
+    MAX(registration_date) AS latest_staging_date
+  FROM ${ref("stg_registration_personal")}
+
+  UNION ALL
+
+  SELECT
+    'pickems_registration',
+    MAX(registration_date)
+  FROM ${ref("stg_registration_pickems")}
+
+  UNION ALL
+
+  SELECT
+    'newsletter',
+    MAX(registration_date)
+  FROM ${ref("stg_registration_newsletter")}
+
+  UNION ALL
+
+  SELECT
+    'community_registration',
+    MAX(registration_date)
+  FROM ${ref("stg_registration_community")}
+
+),
+
+fact_freshness AS (
+
+  SELECT
+    registration_type,
+    MAX(registration_date) AS latest_fact_date
+  FROM ${ref("fact_registrations")}
+  GROUP BY 1
+
+)
+
+SELECT
+  s.registration_type,
+  s.latest_staging_date,
+  f.latest_fact_date,
+  DATE_DIFF(
+    s.latest_staging_date,
+    f.latest_fact_date,
+    DAY
+  ) AS days_behind
+
+FROM staging_freshness s
+LEFT JOIN fact_freshness f
+  USING (registration_type)
+
+WHERE
+  s.latest_staging_date IS NULL
+  OR f.latest_fact_date IS NULL
+  OR f.latest_fact_date < s.latest_staging_date
