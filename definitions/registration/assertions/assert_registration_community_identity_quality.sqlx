@@ -1,0 +1,19 @@
+config {
+  type: "assertion",
+  tags: ["registration", "dq", "identity", "community"]
+}
+
+SELECT
+  registration_id,
+  registration_date,
+  registration_type,
+  user_pseudo_id
+
+FROM ${ref("fact_registrations")}
+
+WHERE registration_type = 'community_registration'
+  AND user_pseudo_id IS NOT NULL
+  AND REGEXP_CONTAINS(
+    TRIM(user_pseudo_id),
+    r'^user-\d+$'
+  )
