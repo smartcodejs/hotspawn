@@ -5,7 +5,13 @@ config {
 
 WITH canonical AS (
 
-  SELECT *
+  SELECT
+    registration_id,
+    registration_date,
+    registration_timestamp,
+    registration_type,
+    source_system,
+    user_pseudo_id
   FROM ${ref("fact_registrations")}
 
 ),
@@ -13,43 +19,32 @@ WITH canonical AS (
 community_identity AS (
 
   SELECT
-    DATE(COALESCE(timestamp, original_timestamp, received_at)) AS registration_date,
+    TO_HEX(
+      SHA256(
+        CONCAT(
+          'community_registration|',
+          CAST(id AS STRING)
+        )
+      )
+    ) AS registration_id,
 
     id AS community_event_id,
     CAST(user_id AS STRING) AS community_user_id,
 
-    NULLIF(LOWER(TRIM(email)), '') AS email,
-
-    -- Important:
-    -- this is Community identity, NOT a valid GA4 pseudo ID
-    user_pseudo_id AS community_source_user_pseudo_id,
-
-    ROW_NUMBER() OVER (
-      PARTITION BY DATE(COALESCE(timestamp, original_timestamp, received_at))
-      ORDER BY COALESCE(timestamp, original_timestamp, received_at), id
-    ) AS community_row_number
+    NULLIF(
+      LOWER(TRIM(email)),
+      ''
+    ) AS email
 
   FROM ${ref("account_created")}
 
-  WHERE env = 'prod'
-    AND source = 'backend'
+  WHERE source = 'backend'
     AND event = 'account_created'
-
-),
-
-community_canonical AS (
-
-  SELECT
-    c.*,
-
-    ROW_NUMBER() OVER (
-      PARTITION BY registration_date
-      ORDER BY registration_id
-    ) AS community_row_number
-
-  FROM canonical c
-
-  WHERE registration_type = 'community_registration'
+    AND (
+      env = 'prod'
+      OR env IS NULL
+      OR TRIM(env) = ''
+    )
 
 ),
 
@@ -62,22 +57,25 @@ community_enriched AS (
     c.registration_type,
     c.source_system,
 
-    -- Historical Community GA4 identity remains unavailable
+    -- Historical Community GA4 pseudo identity is unavailable.
     CAST(NULL AS STRING) AS valid_user_pseudo_id,
 
     i.email,
     i.community_user_id,
     i.community_event_id,
 
-    'HISTORICAL_COMMUNITY_NON_GA4_ID' AS identity_quality_status
+    CASE
+      WHEN i.registration_id IS NOT NULL
+        THEN 'HISTORICAL_COMMUNITY_NON_GA4_ID'
+      ELSE 'COMMUNITY_IDENTITY_NOT_FOUND'
+    END AS identity_quality_status
 
-  FROM community_canonical c
+  FROM canonical c
 
   LEFT JOIN community_identity i
-    USING (
-      registration_date,
-      community_row_number
-    )
+    USING (registration_id)
+
+  WHERE c.registration_type = 'community_registration'
 
 ),
 
@@ -111,7 +109,9 @@ non_community AS (
 combined AS (
 
   SELECT * FROM community_enriched
+
   UNION ALL
+
   SELECT * FROM non_community
 
 )
