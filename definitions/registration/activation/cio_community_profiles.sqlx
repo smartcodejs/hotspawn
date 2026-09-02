@@ -1,0 +1,68 @@
+config {
+  type: "view",
+  tags: ["registration", "customerio", "activation", "community"]
+}
+
+WITH community_native AS (
+
+  SELECT
+    TO_HEX(
+      SHA256(
+        CONCAT(
+          'community_registration|',
+          CAST(id AS STRING)
+        )
+      )
+    ) AS registration_id,
+
+    LOWER(TRIM(email)) AS email,
+    CAST(user_id AS STRING) AS community_user_id,
+    handle AS community_handle,
+    id AS community_event_id,
+    timestamp AS community_registration_timestamp,
+    DATE(timestamp) AS community_registration_date,
+    source AS community_registration_source,
+    event AS community_registration_event
+
+  FROM ${ref("account_created")}
+
+  WHERE source = 'backend'
+    AND event = 'account_created'
+    AND (
+      env = 'prod'
+      OR env IS NULL
+      OR TRIM(env) = ''
+    )
+    AND NULLIF(TRIM(email), '') IS NOT NULL
+),
+
+canonical AS (
+
+  SELECT
+    registration_id
+
+  FROM ${ref("fact_registrations")}
+
+  WHERE registration_type = 'community_registration'
+)
+
+SELECT
+  n.email,
+
+  n.community_user_id,
+  n.community_handle,
+
+  'true' AS community_registered,
+
+  n.community_registration_timestamp,
+  n.community_registration_date,
+  n.community_event_id,
+  n.community_registration_source,
+  n.community_registration_event,
+
+  n.registration_id
+
+FROM canonical c
+
+JOIN community_native n
+  USING (registration_id)
