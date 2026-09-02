@@ -1,0 +1,11 @@
+SELECT
+  registration_type,
+  COUNT(*) AS registrations,
+  COUNTIF(user_pseudo_id IS NOT NULL) AS with_pseudo_id,
+  COUNTIF(user_pseudo_id IS NULL) AS without_pseudo_id,
+  COUNT(DISTINCT user_pseudo_id) AS distinct_pseudo_ids,
+  MIN(registration_date) AS first_date,
+  MAX(registration_date) AS latest_date
+FROM `hotspawn-440312.dataform.fact_registrations`
+GROUP BY 1
+ORDER BY 1;
