@@ -3,14 +3,43 @@ config {
   tags: ["registration", "customerio", "identity", "community"]
 }
 
-WITH community AS (
+WITH community_native AS (
 
-  SELECT DISTINCT
+  SELECT
+    TO_HEX(
+      SHA256(
+        CONCAT(
+          'community_registration|',
+          CAST(id AS STRING)
+        )
+      )
+    ) AS registration_id,
+
     LOWER(TRIM(email)) AS email
 
-  FROM ${ref("cio_community_profiles")}
+  FROM ${ref("account_created")}
 
-  WHERE NULLIF(TRIM(email), '') IS NOT NULL
+  WHERE source = 'backend'
+    AND event = 'account_created'
+    AND (
+      env = 'prod'
+      OR env IS NULL
+      OR TRIM(env) = ''
+    )
+    AND NULLIF(TRIM(email), '') IS NOT NULL
+),
+
+community AS (
+
+  SELECT DISTINCT
+    n.email
+
+  FROM ${ref("fact_registrations")} f
+
+  JOIN community_native n
+    USING (registration_id)
+
+  WHERE f.registration_type = 'community_registration'
 ),
 
 identity_events AS (
