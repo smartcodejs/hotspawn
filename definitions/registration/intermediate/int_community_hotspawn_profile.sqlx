@@ -1,0 +1,69 @@
+config {
+  type: "view",
+  tags: ["registration", "customerio", "identity", "community", "enrichment"]
+}
+
+WITH hotspawn_profile AS (
+
+  SELECT
+    user_pseudo_id,
+
+    ARRAY_AGG(
+      STRUCT(
+        signup_date,
+        acquisition_channel,
+        acquisition_source,
+        country,
+        device_type
+      )
+      ORDER BY signup_date DESC
+      LIMIT 1
+    )[OFFSET(0)] AS latest_profile,
+
+    MAX(total_sessions) AS total_sessions,
+
+    MAX(COALESCE(user_signup_event, 0)) AS personal_registered,
+    MAX(COALESCE(pickems_signup, 0)) AS pickems_registered,
+    MAX(COALESCE(newsletter_signup_event, 0)) AS newsletter_subscribed
+
+  FROM ${ref("user_signup_schema")}
+
+  WHERE COALESCE(community_registration, 0) = 0
+    AND user_pseudo_id IS NOT NULL
+
+  GROUP BY user_pseudo_id
+)
+
+SELECT
+  i.email,
+  i.user_pseudo_id,
+  i.identity_status,
+  i.pseudo_id_count,
+  i.pseudo_email_count,
+  i.hotspawn_identity_first_seen,
+  i.hotspawn_identity_last_seen,
+
+  p.latest_profile.acquisition_channel,
+  p.latest_profile.acquisition_source,
+  p.latest_profile.country,
+  p.latest_profile.device_type,
+  p.total_sessions,
+
+  p.personal_registered,
+  p.pickems_registered,
+  p.newsletter_subscribed,
+
+  CASE
+    WHEN i.identity_status != 'COMMUNITY_HOTSPAWN_IDENTIFIED'
+      THEN 'NO_SAFE_HOTSPAWN_IDENTITY'
+
+    WHEN p.user_pseudo_id IS NULL
+      THEN 'IDENTIFIED_NO_CURATED_PROFILE'
+
+    ELSE 'HOTSPAWN_PROFILE_ENRICHED'
+  END AS enrichment_status
+
+FROM ${ref("int_community_hotspawn_identity")} i
+
+LEFT JOIN hotspawn_profile p
+  USING (user_pseudo_id)
