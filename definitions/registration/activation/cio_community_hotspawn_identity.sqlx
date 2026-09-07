@@ -1,0 +1,33 @@
+config {
+  type: "view",
+  tags: ["registration", "customerio", "activation", "community", "hotspawn", "identity"]
+}
+
+SELECT
+  email,
+
+  user_pseudo_id AS ga4_user_pseudo_id,
+
+  hotspawn_identity_first_seen,
+  hotspawn_identity_last_seen,
+
+  TO_HEX(
+    SHA256(
+      CONCAT(
+        'community_hotspawn_identity|',
+        email
+      )
+    )
+  ) AS enrichment_id
+
+FROM ${ref("int_community_hotspawn_identity")}
+
+WHERE identity_status = 'COMMUNITY_HOTSPAWN_IDENTIFIED'
+
+  -- Hard safety requirements:
+  -- this activation view must never contain NULL values
+  -- for any field that will be mapped to Customer.io.
+  AND NULLIF(TRIM(email), '') IS NOT NULL
+  AND NULLIF(TRIM(user_pseudo_id), '') IS NOT NULL
+  AND hotspawn_identity_first_seen IS NOT NULL
+  AND hotspawn_identity_last_seen IS NOT NULL
