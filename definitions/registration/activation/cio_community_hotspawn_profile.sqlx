@@ -1,0 +1,33 @@
+config {
+  type: "view",
+  tags: ["registration", "customerio", "activation", "community", "hotspawn", "profile"]
+}
+
+SELECT
+  email,
+
+  acquisition_channel,
+  acquisition_source,
+  country,
+  device_type,
+  total_sessions,
+
+  TO_HEX(
+    SHA256(
+      CONCAT(
+        'community_hotspawn_profile|',
+        email
+      )
+    )
+  ) AS enrichment_id
+
+FROM ${ref("int_community_hotspawn_profile")}
+
+WHERE enrichment_status = 'HOTSPAWN_PROFILE_ENRICHED'
+
+  AND NULLIF(TRIM(email), '') IS NOT NULL
+  AND NULLIF(TRIM(acquisition_channel), '') IS NOT NULL
+  AND NULLIF(TRIM(acquisition_source), '') IS NOT NULL
+  AND NULLIF(TRIM(country), '') IS NOT NULL
+  AND NULLIF(TRIM(device_type), '') IS NOT NULL
+  AND total_sessions IS NOT NULL
