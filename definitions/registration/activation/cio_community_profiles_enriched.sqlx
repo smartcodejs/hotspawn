@@ -1,0 +1,29 @@
+config {
+  type: "view",
+  tags: ["registration", "customerio", "activation", "community", "enrichment"]
+}
+
+SELECT
+  c.*,
+
+  p.user_pseudo_id AS ga4_user_pseudo_id,
+  p.identity_status AS hotspawn_identity_status,
+  p.enrichment_status AS hotspawn_enrichment_status,
+
+  p.hotspawn_identity_first_seen,
+  p.hotspawn_identity_last_seen,
+
+  p.acquisition_channel,
+  p.acquisition_source,
+  p.country,
+  p.device_type,
+  p.total_sessions,
+
+  p.personal_registered,
+  p.pickems_registered,
+  p.newsletter_subscribed
+
+FROM ${ref("cio_community_profiles")} c
+
+LEFT JOIN ${ref("int_community_hotspawn_profile")} p
+  USING (email)
