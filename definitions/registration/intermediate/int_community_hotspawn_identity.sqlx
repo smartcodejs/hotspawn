@@ -1,0 +1,79 @@
+config {
+  type: "view",
+  tags: ["registration", "customerio", "identity", "community"]
+}
+
+WITH community AS (
+
+  SELECT DISTINCT
+    LOWER(TRIM(email)) AS email
+
+  FROM ${ref("cio_community_profiles")}
+
+  WHERE NULLIF(TRIM(email), '') IS NOT NULL
+),
+
+identity_events AS (
+
+  SELECT
+    LOWER(
+      TRIM(
+        COALESCE(
+          NULLIF(context_traits_email, ''),
+          NULLIF(context_traits_user_email, '')
+        )
+      )
+    ) AS email,
+
+    pseudo_id,
+    timestamp
+
+  FROM `hotspawn-440312.website.identifies`,
+  UNNEST([
+    NULLIF(TRIM(context_traits_ga4_pseudo_id), ''),
+    NULLIF(TRIM(context_traits_user_pseudo_id), ''),
+    NULLIF(TRIM(context_traits_hs_ga4_pseudo_id), '')
+  ]) AS pseudo_id
+
+  WHERE pseudo_id IS NOT NULL
+),
+
+resolved AS (
+
+  SELECT
+    c.email,
+
+    COUNT(DISTINCT i.pseudo_id) AS pseudo_id_count,
+
+    CASE
+      WHEN COUNT(DISTINCT i.pseudo_id) = 1
+        THEN ANY_VALUE(i.pseudo_id)
+      ELSE NULL
+    END AS user_pseudo_id,
+
+    MIN(i.timestamp) AS hotspawn_identity_first_seen,
+    MAX(i.timestamp) AS hotspawn_identity_last_seen
+
+  FROM community c
+
+  LEFT JOIN identity_events i
+    USING (email)
+
+  GROUP BY c.email
+)
+
+SELECT
+  email,
+  user_pseudo_id,
+  pseudo_id_count,
+
+  CASE
+    WHEN pseudo_id_count = 0 THEN 'COMMUNITY_ONLY'
+    WHEN pseudo_id_count = 1 THEN 'COMMUNITY_HOTSPAWN_IDENTIFIED'
+    ELSE 'AMBIGUOUS'
+  END AS identity_status,
+
+  hotspawn_identity_first_seen,
+  hotspawn_identity_last_seen
+
+FROM resolved
