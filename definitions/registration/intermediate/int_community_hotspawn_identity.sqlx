@@ -38,7 +38,7 @@ identity_events AS (
   WHERE pseudo_id IS NOT NULL
 ),
 
-resolved AS (
+email_resolution AS (
 
   SELECT
     c.email,
@@ -49,7 +49,7 @@ resolved AS (
       WHEN COUNT(DISTINCT i.pseudo_id) = 1
         THEN ANY_VALUE(i.pseudo_id)
       ELSE NULL
-    END AS user_pseudo_id,
+    END AS candidate_user_pseudo_id,
 
     MIN(i.timestamp) AS hotspawn_identity_first_seen,
     MAX(i.timestamp) AS hotspawn_identity_last_seen
@@ -60,20 +60,50 @@ resolved AS (
     USING (email)
 
   GROUP BY c.email
+),
+
+pseudo_resolution AS (
+
+  SELECT
+    candidate_user_pseudo_id AS user_pseudo_id,
+    COUNT(DISTINCT email) AS pseudo_email_count
+
+  FROM email_resolution
+
+  WHERE candidate_user_pseudo_id IS NOT NULL
+
+  GROUP BY 1
 )
 
 SELECT
-  email,
-  user_pseudo_id,
-  pseudo_id_count,
+  e.email,
 
   CASE
-    WHEN pseudo_id_count = 0 THEN 'COMMUNITY_ONLY'
-    WHEN pseudo_id_count = 1 THEN 'COMMUNITY_HOTSPAWN_IDENTIFIED'
+    WHEN e.pseudo_id_count = 1
+      AND p.pseudo_email_count = 1
+    THEN e.candidate_user_pseudo_id
+    ELSE NULL
+  END AS user_pseudo_id,
+
+  e.pseudo_id_count,
+
+  COALESCE(p.pseudo_email_count, 0) AS pseudo_email_count,
+
+  CASE
+    WHEN e.pseudo_id_count = 0
+      THEN 'COMMUNITY_ONLY'
+
+    WHEN e.pseudo_id_count = 1
+      AND p.pseudo_email_count = 1
+      THEN 'COMMUNITY_HOTSPAWN_IDENTIFIED'
+
     ELSE 'AMBIGUOUS'
   END AS identity_status,
 
-  hotspawn_identity_first_seen,
-  hotspawn_identity_last_seen
+  e.hotspawn_identity_first_seen,
+  e.hotspawn_identity_last_seen
 
-FROM resolved
+FROM email_resolution e
+
+LEFT JOIN pseudo_resolution p
+  ON e.candidate_user_pseudo_id = p.user_pseudo_id
