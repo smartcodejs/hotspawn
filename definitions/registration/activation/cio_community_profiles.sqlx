@@ -48,21 +48,40 @@ canonical AS (
 
 SELECT
   n.email,
-
   n.community_user_id,
   n.community_handle,
-
   'true' AS community_registered,
-
   n.community_registration_timestamp,
   n.community_registration_date,
   n.community_event_id,
   n.community_registration_source,
   n.community_registration_event,
+  n.registration_id,
 
-  n.registration_id
+  -- Hotspawn / GA4 identity enrichment
+  p.user_pseudo_id AS ga4_user_pseudo_id,
+  p.identity_status AS hotspawn_identity_status,
+  p.enrichment_status AS hotspawn_enrichment_status,
+
+  p.hotspawn_identity_first_seen,
+  p.hotspawn_identity_last_seen,
+
+  -- Curated Hotspawn profile attributes
+  p.acquisition_channel,
+  p.acquisition_source,
+  p.country,
+  p.device_type,
+  p.total_sessions,
+
+  -- Known Hotspawn registration/subscription state
+  p.personal_registered,
+  p.pickems_registered,
+  p.newsletter_subscribed
 
 FROM canonical c
 
 JOIN community_native n
   USING (registration_id)
+
+LEFT JOIN ${ref("int_community_hotspawn_profile")} p
+  ON n.email = p.email
