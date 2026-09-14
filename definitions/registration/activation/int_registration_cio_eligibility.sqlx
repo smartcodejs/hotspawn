@@ -3,7 +3,7 @@ config {
   schema: "dataform",
   name: "int_registration_cio_eligibility",
   description: "Registration-level Customer.io identity eligibility. Canonical registration truth comes from fact_registrations. Community email comes from native Community account_created. Pickems email is enriched only when RudderStack identifies provides exactly one unambiguous email for the canonical GA4 pseudo ID. Registered-user activation requires email.",
-  tags: ["registration"]
+  tags: ["registration", "customerio", "activation"]
 }
 
 WITH canonical AS (
@@ -15,13 +15,10 @@ WITH canonical AS (
     registration_type,
     source_system,
     NULLIF(TRIM(user_pseudo_id), '') AS user_pseudo_id
+
   FROM ${ref("fact_registrations")}
 
 ),
-
-/* -------------------------------------------------------------------------- */
-/* COMMUNITY                                                                  */
-/* -------------------------------------------------------------------------- */
 
 community_identity AS (
 
@@ -43,7 +40,7 @@ community_identity AS (
       ''
     ) AS email
 
-  FROM `hotspawn-440312.hotspawn_community_rudderstack.account_created`
+  FROM ${ref("account_created")}
 
   WHERE source = 'backend'
     AND event = 'account_created'
@@ -64,7 +61,6 @@ community_enriched AS (
     c.registration_type,
     c.source_system,
 
-    -- Historical Community source identity is not a valid GA4 pseudo ID.
     CAST(NULL AS STRING) AS valid_user_pseudo_id,
 
     i.email,
@@ -91,18 +87,6 @@ community_enriched AS (
   WHERE c.registration_type = 'community_registration'
 
 ),
-
-/* -------------------------------------------------------------------------- */
-/* PICK'EMS - RUDDERSTACK IDENTITY EVIDENCE                                   */
-/* -------------------------------------------------------------------------- */
-
-/*
-For every RudderStack Identify record, preserve every GA4-style pseudo-ID
-candidate present on the row.
-
-We intentionally do NOT use COALESCE here because different identity fields
-could theoretically contain different values. Each candidate is evaluated.
-*/
 
 pickems_identify_presence_raw AS (
 
@@ -139,13 +123,6 @@ pickems_identify_presence AS (
   GROUP BY user_pseudo_id
 
 ),
-
-/*
-Email candidates are also kept independently instead of using COALESCE.
-If context_traits_email and context_traits_user_email ever disagree, both
-values are included and the identity will become ambiguous rather than one
-email being selected arbitrarily.
-*/
 
 pickems_email_candidates_raw AS (
 
@@ -233,7 +210,6 @@ pickems_enriched AS (
 
     c.user_pseudo_id AS valid_user_pseudo_id,
 
-    -- Email is exposed only when the pseudo ID resolves to exactly one email.
     CASE
       WHEN i.distinct_email_count = 1
         THEN i.email
@@ -268,17 +244,6 @@ pickems_enriched AS (
 
 ),
 
-/* -------------------------------------------------------------------------- */
-/* PERSONAL + NEWSLETTER                                                      */
-/* -------------------------------------------------------------------------- */
-
-/*
-Email enrichment has not yet been approved for these registration types.
-
-Keep their valid GA4 pseudo ID for identity diagnostics / anonymous identity,
-but do NOT mark them ready for the registered-user email-keyed CIO flow.
-*/
-
 other_non_community AS (
 
   SELECT
@@ -309,10 +274,6 @@ other_non_community AS (
 
 ),
 
-/* -------------------------------------------------------------------------- */
-/* COMBINE                                                                    */
-/* -------------------------------------------------------------------------- */
-
 combined AS (
 
   SELECT * FROM community_enriched
@@ -326,10 +287,6 @@ combined AS (
   SELECT * FROM other_non_community
 
 )
-
-/* -------------------------------------------------------------------------- */
-/* FINAL ELIGIBILITY                                                          */
-/* -------------------------------------------------------------------------- */
 
 SELECT
   *,
@@ -348,16 +305,6 @@ SELECT
     ELSE 'NOT_READY'
   END AS cio_identity_state,
 
-  /*
-  IMPORTANT:
-  This model represents the REGISTERED-USER Customer.io activation stream.
-
-  Email is therefore required for activation readiness.
-
-  Pseudo-only users remain valid canonical registrations and may participate
-  in the separate anonymous Customer.io flow, but they are not eligible for
-  this email-keyed registered-user upsert.
-  */
   CASE
     WHEN email IS NOT NULL
       THEN TRUE
