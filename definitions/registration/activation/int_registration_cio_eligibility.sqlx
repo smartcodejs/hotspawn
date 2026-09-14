@@ -2,7 +2,7 @@ config {
   type: "view",
   schema: "dataform",
   name: "int_registration_cio_eligibility",
-  description: "Registration-level Customer.io identity eligibility. Canonical registration truth comes from fact_registrations. Community email comes from native Community account_created. Pickems email is enriched only when RudderStack identifies provides exactly one unambiguous email for the canonical GA4 pseudo ID. Registered-user activation requires email.",
+  description: "Registration-level Customer.io identity eligibility. Canonical registration truth comes from fact_registrations. Community email comes from native Community account_created. Personal and Pickems email are enriched only when RudderStack identifies provides exactly one unambiguous email for the canonical GA4 pseudo ID. Registered-user activation requires email.",
   tags: ["registration", "customerio", "activation"]
 }
 
@@ -19,6 +19,10 @@ WITH canonical AS (
   FROM ${ref("fact_registrations")}
 
 ),
+
+/* -------------------------------------------------------------------------- */
+/* COMMUNITY                                                                  */
+/* -------------------------------------------------------------------------- */
 
 community_identity AS (
 
@@ -87,6 +91,10 @@ community_enriched AS (
   WHERE c.registration_type = 'community_registration'
 
 ),
+
+/* -------------------------------------------------------------------------- */
+/* PICK'EMS                                                                   */
+/* -------------------------------------------------------------------------- */
 
 pickems_identify_presence_raw AS (
 
@@ -244,7 +252,168 @@ pickems_enriched AS (
 
 ),
 
-other_non_community AS (
+/* -------------------------------------------------------------------------- */
+/* PERSONAL                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/*
+Personal identity enrichment is based only on website.identifies.
+
+The registration itself remains authoritative in fact_registrations.
+RudderStack Identify is used only to enrich the canonical pseudo ID with
+a current email identity.
+
+Every supported pseudo-ID field is evaluated independently. Invalid
+placeholder strings are discarded rather than treated as identities.
+*/
+
+personal_email_candidates_raw AS (
+
+  SELECT DISTINCT
+    pseudo_id AS user_pseudo_id,
+    normalized_email AS email
+
+  FROM `hotspawn-440312.website.identifies` i
+
+  CROSS JOIN UNNEST(
+    ARRAY(
+      SELECT DISTINCT candidate
+
+      FROM UNNEST([
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_hs_ga4_pseudo_id)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none'
+          )
+            THEN NULL
+          ELSE NULLIF(TRIM(i.context_traits_hs_ga4_pseudo_id), '')
+        END,
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_ga4_pseudo_id)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none'
+          )
+            THEN NULL
+          ELSE NULLIF(TRIM(i.context_traits_ga4_pseudo_id), '')
+        END,
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_user_pseudo_id)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none'
+          )
+            THEN NULL
+          ELSE NULLIF(TRIM(i.context_traits_user_pseudo_id), '')
+        END
+
+      ]) AS candidate
+
+      WHERE candidate IS NOT NULL
+    )
+  ) AS pseudo_id
+
+  CROSS JOIN UNNEST(
+    ARRAY(
+      SELECT DISTINCT candidate_email
+
+      FROM UNNEST([
+        NULLIF(LOWER(TRIM(i.context_traits_email)), ''),
+        NULLIF(LOWER(TRIM(i.context_traits_user_email)), '')
+      ]) AS candidate_email
+
+      WHERE candidate_email IS NOT NULL
+    )
+  ) AS normalized_email
+
+  WHERE i._PARTITIONTIME >= TIMESTAMP('2026-04-01')
+
+),
+
+personal_email_summary AS (
+
+  SELECT
+    user_pseudo_id,
+    COUNT(DISTINCT email) AS distinct_email_count,
+
+    CASE
+      WHEN COUNT(DISTINCT email) = 1
+        THEN ANY_VALUE(email)
+      ELSE NULL
+    END AS email
+
+  FROM personal_email_candidates_raw
+
+  GROUP BY user_pseudo_id
+
+),
+
+personal_enriched AS (
+
+  SELECT
+    c.registration_id,
+    c.registration_date,
+    c.registration_timestamp,
+    c.registration_type,
+    c.source_system,
+
+    c.user_pseudo_id AS valid_user_pseudo_id,
+
+    CASE
+      WHEN i.distinct_email_count = 1
+        THEN i.email
+      ELSE NULL
+    END AS email,
+
+    CAST(NULL AS STRING) AS community_user_id,
+    CAST(NULL AS STRING) AS community_event_id,
+
+    CASE
+      WHEN c.user_pseudo_id IS NULL
+        THEN 'NO_SUPPORTED_IDENTITY'
+
+      WHEN i.distinct_email_count = 1
+        THEN 'PERSONAL_UNIQUE_EMAIL'
+
+      WHEN i.distinct_email_count > 1
+        THEN 'PERSONAL_MULTIPLE_EMAILS'
+
+      ELSE 'PERSONAL_NO_EMAIL'
+    END AS identity_quality_status
+
+  FROM canonical c
+
+  LEFT JOIN personal_email_summary i
+    ON c.user_pseudo_id = i.user_pseudo_id
+
+  WHERE c.registration_type = 'personal_registration'
+
+),
+
+/* -------------------------------------------------------------------------- */
+/* NEWSLETTER / OTHER TYPES                                                   */
+/* -------------------------------------------------------------------------- */
+
+/*
+Newsletter remains unresolved for registered-user activation.
+
+The dedicated newsletter_subscribed source contains raw email only for a
+limited April 2026 implementation window. Later Newsletter state continues
+without raw email, so partial historical enrichment is intentionally not
+introduced here.
+*/
+
+other_registration_types AS (
 
   SELECT
     registration_id,
@@ -269,10 +438,15 @@ other_non_community AS (
 
   WHERE registration_type NOT IN (
     'community_registration',
+    'personal_registration',
     'pickems_registration'
   )
 
 ),
+
+/* -------------------------------------------------------------------------- */
+/* COMBINE                                                                    */
+/* -------------------------------------------------------------------------- */
 
 combined AS (
 
@@ -280,13 +454,21 @@ combined AS (
 
   UNION ALL
 
+  SELECT * FROM personal_enriched
+
+  UNION ALL
+
   SELECT * FROM pickems_enriched
 
   UNION ALL
 
-  SELECT * FROM other_non_community
+  SELECT * FROM other_registration_types
 
 )
+
+/* -------------------------------------------------------------------------- */
+/* FINAL ELIGIBILITY                                                          */
+/* -------------------------------------------------------------------------- */
 
 SELECT
   *,
@@ -305,6 +487,13 @@ SELECT
     ELSE 'NOT_READY'
   END AS cio_identity_state,
 
+  /*
+  This is the registered-user Customer.io activation stream.
+
+  Email is required for activation readiness. Pseudo-only registrations remain
+  valid canonical registrations and can participate in the separate anonymous
+  identity flow, but they are not ready for this registered-user activation.
+  */
   CASE
     WHEN email IS NOT NULL
       THEN TRUE
