@@ -2,7 +2,7 @@ config {
   type: "view",
   schema: "dataform",
   name: "int_registration_cio_eligibility",
-  description: "Registration-level Customer.io identity eligibility. Canonical registration truth comes from fact_registrations. Community email comes from native Community account_created. Personal and Pickems email are enriched only when RudderStack identifies provides exactly one unambiguous email for the canonical GA4 pseudo ID. Registered-user activation requires email.",
+  description: "Registration-level Customer.io identity eligibility. Canonical registration truth comes from fact_registrations. Community email comes from native Community account_created. Personal and Pickems email are enriched only when RudderStack identifies provides exactly one valid, unambiguous email for the canonical GA4 pseudo ID. Registered-user activation requires email.",
   tags: ["registration", "customerio", "activation"]
 }
 
@@ -99,19 +99,54 @@ community_enriched AS (
 pickems_identify_presence_raw AS (
 
   SELECT DISTINCT
-    pseudo_id AS user_pseudo_id,
-    i.timestamp AS identify_timestamp
+    pseudo_id AS user_pseudo_id
 
   FROM `hotspawn-440312.website.identifies` i
 
   CROSS JOIN UNNEST(
     ARRAY(
       SELECT DISTINCT candidate
+
       FROM UNNEST([
-        NULLIF(TRIM(i.context_traits_hs_ga4_pseudo_id), ''),
-        NULLIF(TRIM(i.context_traits_ga4_pseudo_id), ''),
-        NULLIF(TRIM(i.context_traits_user_pseudo_id), '')
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_hs_ga4_pseudo_id)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none'
+          )
+            THEN NULL
+          ELSE NULLIF(TRIM(i.context_traits_hs_ga4_pseudo_id), '')
+        END,
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_ga4_pseudo_id)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none'
+          )
+            THEN NULL
+          ELSE NULLIF(TRIM(i.context_traits_ga4_pseudo_id), '')
+        END,
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_user_pseudo_id)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none'
+          )
+            THEN NULL
+          ELSE NULLIF(TRIM(i.context_traits_user_pseudo_id), '')
+        END
+
       ]) AS candidate
+
       WHERE candidate IS NOT NULL
     )
   ) AS pseudo_id
@@ -143,11 +178,47 @@ pickems_email_candidates_raw AS (
   CROSS JOIN UNNEST(
     ARRAY(
       SELECT DISTINCT candidate
+
       FROM UNNEST([
-        NULLIF(TRIM(i.context_traits_hs_ga4_pseudo_id), ''),
-        NULLIF(TRIM(i.context_traits_ga4_pseudo_id), ''),
-        NULLIF(TRIM(i.context_traits_user_pseudo_id), '')
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_hs_ga4_pseudo_id)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none'
+          )
+            THEN NULL
+          ELSE NULLIF(TRIM(i.context_traits_hs_ga4_pseudo_id), '')
+        END,
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_ga4_pseudo_id)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none'
+          )
+            THEN NULL
+          ELSE NULLIF(TRIM(i.context_traits_ga4_pseudo_id), '')
+        END,
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_user_pseudo_id)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none'
+          )
+            THEN NULL
+          ELSE NULLIF(TRIM(i.context_traits_user_pseudo_id), '')
+        END
+
       ]) AS candidate
+
       WHERE candidate IS NOT NULL
     )
   ) AS pseudo_id
@@ -155,11 +226,46 @@ pickems_email_candidates_raw AS (
   CROSS JOIN UNNEST(
     ARRAY(
       SELECT DISTINCT candidate_email
+
       FROM UNNEST([
-        NULLIF(LOWER(TRIM(i.context_traits_email)), ''),
-        NULLIF(LOWER(TRIM(i.context_traits_user_email)), '')
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_email)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none',
+            'nan',
+            'n/a',
+            'na'
+          )
+            THEN NULL
+          ELSE NULLIF(LOWER(TRIM(i.context_traits_email)), '')
+        END,
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_user_email)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none',
+            'nan',
+            'n/a',
+            'na'
+          )
+            THEN NULL
+          ELSE NULLIF(LOWER(TRIM(i.context_traits_user_email)), '')
+        END
+
       ]) AS candidate_email
+
       WHERE candidate_email IS NOT NULL
+        AND REGEXP_CONTAINS(
+          candidate_email,
+          r'^[^@\s]+@[^@\s]+\.[^@\s]+$'
+        )
     )
   ) AS normalized_email
 
@@ -257,14 +363,15 @@ pickems_enriched AS (
 /* -------------------------------------------------------------------------- */
 
 /*
-Personal identity enrichment is based only on website.identifies.
+Personal registration truth remains in fact_registrations.
 
-The registration itself remains authoritative in fact_registrations.
-RudderStack Identify is used only to enrich the canonical pseudo ID with
-a current email identity.
+website.identifies is used only as identity enrichment.
 
-Every supported pseudo-ID field is evaluated independently. Invalid
-placeholder strings are discarded rather than treated as identities.
+A Personal registration receives email only when its canonical pseudo ID
+maps to exactly one valid email address.
+
+Invalid placeholder values are removed. Multiple emails for one pseudo ID
+are treated as ambiguous and are not exposed for activation.
 */
 
 personal_email_candidates_raw AS (
@@ -328,11 +435,44 @@ personal_email_candidates_raw AS (
       SELECT DISTINCT candidate_email
 
       FROM UNNEST([
-        NULLIF(LOWER(TRIM(i.context_traits_email)), ''),
-        NULLIF(LOWER(TRIM(i.context_traits_user_email)), '')
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_email)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none',
+            'nan',
+            'n/a',
+            'na'
+          )
+            THEN NULL
+          ELSE NULLIF(LOWER(TRIM(i.context_traits_email)), '')
+        END,
+
+        CASE
+          WHEN LOWER(TRIM(i.context_traits_user_email)) IN (
+            '',
+            'undefined',
+            'null',
+            '(not set)',
+            'none',
+            'nan',
+            'n/a',
+            'na'
+          )
+            THEN NULL
+          ELSE NULLIF(LOWER(TRIM(i.context_traits_user_email)), '')
+        END
+
       ]) AS candidate_email
 
       WHERE candidate_email IS NOT NULL
+        AND REGEXP_CONTAINS(
+          candidate_email,
+          r'^[^@\s]+@[^@\s]+\.[^@\s]+$'
+        )
     )
   ) AS normalized_email
 
@@ -408,9 +548,10 @@ personal_enriched AS (
 Newsletter remains unresolved for registered-user activation.
 
 The dedicated newsletter_subscribed source contains raw email only for a
-limited April 2026 implementation window. Later Newsletter state continues
-without raw email, so partial historical enrichment is intentionally not
-introduced here.
+limited April 2026 implementation window.
+
+Later Newsletter state continues without raw email, therefore partial
+historical enrichment is intentionally not used here.
 */
 
 other_registration_types AS (
@@ -488,11 +629,11 @@ SELECT
   END AS cio_identity_state,
 
   /*
-  This is the registered-user Customer.io activation stream.
+  Registered-user Customer.io activation is email-keyed.
 
-  Email is required for activation readiness. Pseudo-only registrations remain
-  valid canonical registrations and can participate in the separate anonymous
-  identity flow, but they are not ready for this registered-user activation.
+  Pseudo-only registrations remain valid canonical registrations and may
+  participate in the separate anonymous identity flow, but they are not
+  eligible for this registered-user activation.
   */
   CASE
     WHEN email IS NOT NULL
