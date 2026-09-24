@@ -1,0 +1,784 @@
+config {
+  type: "table",
+  schema: "affiliate_reporting",
+  name: "thunderpick_hs_lander_operator_journey",
+  description: "Unified Thunderpick journey from original Hotspawn session through lander to operator click. One row per AFP."
+}
+
+WITH ga4_source AS (
+
+  SELECT
+    _TABLE_SUFFIX AS source_table_suffix,
+
+    CASE
+      WHEN STARTS_WITH(_TABLE_SUFFIX, 'intraday_')
+        THEN 1
+      ELSE 0
+    END AS source_priority,
+
+    TIMESTAMP_MICROS(event_timestamp) AS event_ts,
+    event_timestamp,
+    event_name,
+    user_pseudo_id,
+    event_bundle_sequence_id,
+
+    (
+      SELECT value.int_value
+      FROM UNNEST(event_params)
+      WHERE key = 'ga_session_id'
+      LIMIT 1
+    ) AS ga_session_id,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'page_location'
+      LIMIT 1
+    ) AS page_location,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'page_referrer'
+      LIMIT 1
+    ) AS page_referrer,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'destination_url'
+      LIMIT 1
+    ) AS destination_url,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'link_text'
+      LIMIT 1
+    ) AS link_text,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'lander_click_position'
+      LIMIT 1
+    ) AS lander_click_position,
+
+    (
+      SELECT COALESCE(
+        value.string_value,
+        CAST(value.int_value AS STRING)
+      )
+      FROM UNNEST(event_params)
+      WHERE key = 'afp'
+      LIMIT 1
+    ) AS event_afp,
+
+    COALESCE(
+      (
+        SELECT value.string_value
+        FROM UNNEST(event_params)
+        WHERE key = 'hs_ga4_pseudo_id'
+        LIMIT 1
+      ),
+      (
+        SELECT value.string_value
+        FROM UNNEST(event_params)
+        WHERE key = 'hotspawn_user_pseudo_id'
+        LIMIT 1
+      )
+    ) AS event_hotspawn_user_pseudo_id,
+
+    (
+      SELECT COALESCE(
+        value.string_value,
+        CAST(value.int_value AS STRING)
+      )
+      FROM UNNEST(event_params)
+      WHERE key = 'hs_ga4_session_id'
+      LIMIT 1
+    ) AS event_hotspawn_session_id,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'source_feature'
+      LIMIT 1
+    ) AS source_feature,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'source_page_url'
+      LIMIT 1
+    ) AS source_page_url,
+
+    session_traffic_source_last_click
+      .cross_channel_campaign.source
+      AS session_source,
+
+    session_traffic_source_last_click
+      .cross_channel_campaign.medium
+      AS session_medium,
+
+    session_traffic_source_last_click
+      .cross_channel_campaign.campaign_name
+      AS session_campaign,
+
+    session_traffic_source_last_click
+      .cross_channel_campaign.default_channel_group
+      AS default_channel_group
+
+  FROM
+    `hotspawn-440312.analytics_457395054.events_*`
+
+  WHERE
+    REGEXP_EXTRACT(
+      _TABLE_SUFFIX,
+      r'(\d{8})$'
+    )
+    BETWEEN '20260701'
+    AND FORMAT_DATE(
+      '%Y%m%d',
+      CURRENT_DATE('Europe/Bratislava')
+    )
+),
+
+/*
+Remove duplicates when the same event temporarily exists
+in both events_YYYYMMDD and events_intraday_YYYYMMDD.
+The finalized daily table is preferred.
+*/
+ga4_raw AS (
+
+  SELECT
+    * EXCEPT(source_priority)
+
+  FROM ga4_source
+
+  QUALIFY ROW_NUMBER() OVER (
+
+    PARTITION BY
+      event_timestamp,
+      event_name,
+      COALESCE(user_pseudo_id, ''),
+      COALESCE(
+        CAST(event_bundle_sequence_id AS STRING),
+        ''
+      ),
+      COALESCE(
+        CAST(ga_session_id AS STRING),
+        ''
+      ),
+      COALESCE(page_location, '')
+
+    ORDER BY source_priority
+
+  ) = 1
+),
+
+events AS (
+
+  SELECT
+    *,
+
+    LOWER(
+      NET.HOST(page_location)
+    ) AS hostname,
+
+    /*
+    Journey AFP.
+    */
+    COALESCE(
+
+      event_afp,
+
+      REGEXP_EXTRACT(
+        page_location,
+        r'(?i)[?&]afp=([^&#]+)'
+      ),
+
+      REGEXP_EXTRACT(
+        destination_url,
+        r'(?i)[?&]afp=([^&#]+)'
+      ),
+
+      REGEXP_EXTRACT(
+        destination_url,
+        r'(?i)[?&]cxd=[^&#]*_(hs-vt-[^&#]+)'
+      )
+
+    ) AS afp,
+
+    /*
+    Original Hotspawn GA4 client ID.
+    */
+    COALESCE(
+
+      event_hotspawn_user_pseudo_id,
+
+      REGEXP_EXTRACT(
+        page_location,
+        r'(?i)[?&]hs_ga4_pseudo_id=([^&#]+)'
+      ),
+
+      REGEXP_EXTRACT(
+        page_location,
+        r'(?i)[?&]hotspawn_user_pseudo_id=([^&#]+)'
+      )
+
+    ) AS passed_hotspawn_user_pseudo_id,
+
+    /*
+    Original Hotspawn GA4 session ID.
+    */
+    SAFE_CAST(
+      COALESCE(
+
+        event_hotspawn_session_id,
+
+        REGEXP_EXTRACT(
+          page_location,
+          r'(?i)[?&]hs_ga4_session_id=([0-9]+)'
+        )
+
+      )
+      AS INT64
+    ) AS passed_hotspawn_session_id
+
+  FROM ga4_raw
+),
+
+/*
+One row per AFP on the lander.
+*/
+lander AS (
+
+  SELECT
+    afp,
+
+    MIN(event_ts) AS lander_entry_ts,
+
+    COUNT(*) AS lander_event_count,
+
+    COUNTIF(
+      event_name = 'page_view'
+    ) AS lander_page_view_count,
+
+    ARRAY_AGG(
+      source_table_suffix
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS lander_source_table,
+
+    /*
+    Native lander GA4 identity.
+    */
+    ARRAY_AGG(
+      user_pseudo_id
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS lander_user_pseudo_id,
+
+    ARRAY_AGG(
+      ga_session_id
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS lander_session_id,
+
+    /*
+    Original Hotspawn identity passed in the URL.
+    */
+    ARRAY_AGG(
+      passed_hotspawn_user_pseudo_id
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS passed_hotspawn_user_pseudo_id,
+
+    ARRAY_AGG(
+      passed_hotspawn_session_id
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS passed_hotspawn_session_id,
+
+    ARRAY_AGG(
+      page_location
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS lander_page_url,
+
+    ARRAY_AGG(
+      page_referrer
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS lander_page_referrer,
+
+    ARRAY_AGG(
+      source_feature
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS source_feature,
+
+    ARRAY_AGG(
+      source_page_url
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS passed_source_page_url
+
+  FROM events
+
+  WHERE
+    hostname = 'hotspawn-world-championship-thunderpick.io'
+
+    AND afp IS NOT NULL
+
+  GROUP BY afp
+),
+
+/*
+One row per AFP for operator clicks.
+*/
+operator_clicks AS (
+
+  SELECT
+    afp,
+
+    MIN(event_ts)
+      AS first_operator_click_ts,
+
+    MAX(event_ts)
+      AS last_operator_click_ts,
+
+    COUNT(*)
+      AS operator_click_count,
+
+    ARRAY_AGG(
+      source_table_suffix
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS operator_source_table,
+
+    /*
+    Native GA4 identity attached to operator_click.
+    */
+    ARRAY_AGG(
+      user_pseudo_id
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS operator_click_user_pseudo_id,
+
+    ARRAY_AGG(
+      ga_session_id
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS operator_click_session_id,
+
+    /*
+    Original Hotspawn identity from operator_click,
+    when explicitly available.
+    */
+    ARRAY_AGG(
+      passed_hotspawn_user_pseudo_id
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS passed_hotspawn_user_pseudo_id,
+
+    ARRAY_AGG(
+      passed_hotspawn_session_id
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS passed_hotspawn_session_id,
+
+    ARRAY_AGG(
+      destination_url
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS operator_destination_url,
+
+    ARRAY_AGG(
+      link_text
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS first_operator_link_text,
+
+    ARRAY_AGG(
+      lander_click_position
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS first_operator_click_position
+
+  FROM events
+
+  WHERE
+    event_name IN (
+      'operator_click',
+      'thunderpick_operator_click'
+    )
+
+    AND afp IS NOT NULL
+
+  GROUP BY afp
+),
+
+all_afps AS (
+
+  SELECT afp
+  FROM lander
+
+  UNION DISTINCT
+
+  SELECT afp
+  FROM operator_clicks
+),
+
+journey AS (
+
+  SELECT
+    a.afp,
+
+    /*
+    Original Hotspawn identity.
+    Prefer the lander URL values.
+    */
+    COALESCE(
+      l.passed_hotspawn_user_pseudo_id,
+      o.passed_hotspawn_user_pseudo_id
+    ) AS original_hotspawn_user_pseudo_id,
+
+    COALESCE(
+      l.passed_hotspawn_session_id,
+      o.passed_hotspawn_session_id
+    ) AS original_hotspawn_session_id,
+
+    /*
+    Lander stage.
+    */
+    l.lander_entry_ts,
+    l.lander_event_count,
+    l.lander_page_view_count,
+    l.lander_source_table,
+
+    l.lander_user_pseudo_id,
+    l.lander_session_id,
+
+    l.lander_page_url,
+    l.lander_page_referrer,
+    l.source_feature,
+    l.passed_source_page_url,
+
+    /*
+    Operator stage.
+    */
+    o.first_operator_click_ts,
+    o.last_operator_click_ts,
+    o.operator_click_count,
+    o.operator_source_table,
+
+    o.operator_click_user_pseudo_id,
+    o.operator_click_session_id,
+
+    o.operator_destination_url,
+    o.first_operator_link_text,
+    o.first_operator_click_position
+
+  FROM all_afps AS a
+
+  LEFT JOIN lander AS l
+    ON a.afp = l.afp
+
+  LEFT JOIN operator_clicks AS o
+    ON a.afp = o.afp
+),
+
+/*
+Resolve the exact original Hotspawn session.
+*/
+hotspawn_source_session AS (
+
+  SELECT
+    j.afp,
+
+    COUNT(e.event_ts)
+      AS hotspawn_event_count,
+
+    MIN(e.event_ts)
+      AS hotspawn_session_start_ts,
+
+    MAX(e.event_ts)
+      AS hotspawn_last_event_before_lander_ts,
+
+    ARRAY_AGG(
+      e.source_table_suffix
+      IGNORE NULLS
+      ORDER BY e.event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS hotspawn_source_table,
+
+    ARRAY_AGG(
+      e.page_location
+      IGNORE NULLS
+      ORDER BY e.event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS hotspawn_landing_page_url,
+
+    ARRAY_AGG(
+      e.page_location
+      IGNORE NULLS
+      ORDER BY e.event_ts DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS hotspawn_last_page_before_lander_url,
+
+    ARRAY_AGG(
+      e.session_source
+      IGNORE NULLS
+      ORDER BY e.event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS session_source,
+
+    ARRAY_AGG(
+      e.session_medium
+      IGNORE NULLS
+      ORDER BY e.event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS session_medium,
+
+    ARRAY_AGG(
+      e.session_campaign
+      IGNORE NULLS
+      ORDER BY e.event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS session_campaign,
+
+    ARRAY_AGG(
+      e.default_channel_group
+      IGNORE NULLS
+      ORDER BY e.event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS default_channel_group
+
+  FROM journey AS j
+
+  LEFT JOIN events AS e
+
+    ON e.user_pseudo_id =
+       j.original_hotspawn_user_pseudo_id
+
+   AND e.ga_session_id =
+       j.original_hotspawn_session_id
+
+   AND (
+     e.hostname = 'hotspawn.com'
+     OR ENDS_WITH(
+       e.hostname,
+       '.hotspawn.com'
+     )
+   )
+
+   AND e.event_ts <= COALESCE(
+     j.lander_entry_ts,
+     j.first_operator_click_ts
+   )
+
+  GROUP BY j.afp
+)
+
+SELECT
+
+  /*
+  Main journey identifier.
+  */
+  j.afp,
+
+  /*
+  Original Hotspawn GA4 identity.
+  */
+  j.original_hotspawn_user_pseudo_id,
+  j.original_hotspawn_session_id,
+
+  CONCAT(
+    j.original_hotspawn_user_pseudo_id,
+    '|',
+    CAST(
+      j.original_hotspawn_session_id
+      AS STRING
+    )
+  ) AS original_hotspawn_session_key,
+
+  /*
+  Original Hotspawn session.
+  */
+  h.hotspawn_event_count,
+  h.hotspawn_session_start_ts,
+  h.hotspawn_last_event_before_lander_ts,
+  h.hotspawn_source_table,
+
+  h.hotspawn_landing_page_url,
+  h.hotspawn_last_page_before_lander_url,
+
+  h.session_source,
+  h.session_medium,
+  h.session_campaign,
+  h.default_channel_group,
+
+  /*
+  Native lander GA4 identity.
+  */
+  j.lander_user_pseudo_id,
+  j.lander_session_id,
+
+  CONCAT(
+    j.lander_user_pseudo_id,
+    '|',
+    CAST(
+      j.lander_session_id
+      AS STRING
+    )
+  ) AS lander_session_key,
+
+  j.lander_entry_ts,
+  j.lander_event_count,
+  j.lander_page_view_count,
+  j.lander_source_table,
+
+  j.lander_page_url,
+  j.lander_page_referrer,
+  j.source_feature,
+  j.passed_source_page_url,
+
+  /*
+  Native operator-click GA4 identity.
+  */
+  j.operator_click_user_pseudo_id,
+  j.operator_click_session_id,
+
+  CONCAT(
+    j.operator_click_user_pseudo_id,
+    '|',
+    CAST(
+      j.operator_click_session_id
+      AS STRING
+    )
+  ) AS operator_click_session_key,
+
+  j.first_operator_click_ts,
+  j.last_operator_click_ts,
+
+  COALESCE(
+    j.operator_click_count,
+    0
+  ) AS operator_click_count,
+
+  j.operator_source_table,
+  j.operator_destination_url,
+  j.first_operator_link_text,
+  j.first_operator_click_position,
+
+  /*
+  Journey timing.
+  */
+  TIMESTAMP_DIFF(
+    j.lander_entry_ts,
+    h.hotspawn_last_event_before_lander_ts,
+    SECOND
+  ) AS seconds_hotspawn_to_lander,
+
+  TIMESTAMP_DIFF(
+    j.first_operator_click_ts,
+    j.lander_entry_ts,
+    SECOND
+  ) AS seconds_lander_to_operator,
+
+  /*
+  Stage flags.
+  */
+  h.hotspawn_event_count > 0
+    AS has_original_hotspawn_session,
+
+  j.lander_entry_ts IS NOT NULL
+    AS has_lander_visit,
+
+  j.first_operator_click_ts IS NOT NULL
+    AS has_operator_click,
+
+  /*
+  Diagnosis.
+  */
+  CASE
+
+    WHEN j.original_hotspawn_user_pseudo_id IS NULL
+      THEN 'Missing original Hotspawn client ID'
+
+    WHEN j.original_hotspawn_session_id IS NULL
+      THEN 'Missing original Hotspawn session ID'
+
+    WHEN h.hotspawn_event_count = 0
+      THEN 'Original IDs found, but Hotspawn session not found in export'
+
+    WHEN j.lander_entry_ts IS NULL
+      THEN 'Hotspawn identity found, but lander visit missing'
+
+    WHEN j.first_operator_click_ts IS NULL
+      THEN 'Hotspawn and lander matched; operator_click missing'
+
+    WHEN j.operator_click_user_pseudo_id IS NULL
+      THEN 'Operator click found, but native operator client ID is missing'
+
+    WHEN j.operator_click_session_id IS NULL
+      THEN 'Operator click found, but native operator session ID is missing'
+
+    WHEN j.lander_user_pseudo_id !=
+         j.operator_click_user_pseudo_id
+      THEN 'Operator click uses a different native client ID'
+
+    WHEN j.lander_session_id !=
+         j.operator_click_session_id
+      THEN 'Operator click uses a different native session ID'
+
+    ELSE
+      'Fully stitchable: Hotspawn → lander → operator'
+
+  END AS stitching_status
+
+FROM journey AS j
+
+LEFT JOIN hotspawn_source_session AS h
+  ON j.afp = h.afp
