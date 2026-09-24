@@ -1,0 +1,303 @@
+config {
+  type: "incremental",
+  database: "hotspawn-440312",
+  schema: "analytics_457395054",
+  name: "crm_performance_level_schema",
+  uniqueKey: ["delivery_id"],
+  tags: ["crm_prod"],
+  bigquery: {
+    partitionBy: "delivery_date",
+    clusterBy: ["email_type", "campaign_name"]
+  }
+}
+
+pre_operations {
+  ${when(incremental(), `
+    DELETE FROM ${self()}
+    WHERE delivery_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY);
+  `, ``)}
+}
+
+WITH
+
+latest_campaigns AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      c.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY campaign_id
+        ORDER BY version DESC, updated_at DESC
+      ) AS rn
+    FROM `hotspawn-440312.customer_io_export._ext_campaigns_v5` c
+  )
+  WHERE rn = 1
+),
+
+latest_campaign_actions AS (
+  SELECT * EXCEPT(rn)
+  FROM (
+    SELECT
+      ca.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY campaign_id, action_id
+        ORDER BY version DESC, updated_at DESC
+      ) AS rn
+    FROM `hotspawn-440312.customer_io_export._ext_campaign_actions_v5` ca
+  )
+  WHERE rn = 1
+),
+
+latest_user_pseudo_id AS (
+  SELECT
+    internal_customer_id,
+    user_pseudo_id
+  FROM (
+    SELECT
+      internal_customer_id,
+      SAFE_CAST(attribute_value AS STRING) AS user_pseudo_id,
+      ROW_NUMBER() OVER (
+        PARTITION BY internal_customer_id
+        ORDER BY `timestamp` DESC
+      ) AS rn
+    FROM `hotspawn-440312.customer_io_export._ext_attributes_v5`
+    WHERE attribute_name = 'user_pseudo_id'
+  )
+  WHERE rn = 1
+),
+
+ga4_country AS (
+  SELECT
+    pseudo_user_id,
+    country
+  FROM (
+    SELECT
+      pseudo_user_id,
+      geo.country AS country,
+      ROW_NUMBER() OVER (
+        PARTITION BY pseudo_user_id
+        ORDER BY occurrence_date DESC
+      ) AS rn
+    FROM `hotspawn-440312.analytics_457395054.pseudonymous_users_*`
+    WHERE geo.country IS NOT NULL
+  )
+  WHERE rn = 1
+),
+
+country_per_internal_id AS (
+  SELECT
+    lup.internal_customer_id,
+    g.country
+  FROM latest_user_pseudo_id lup
+  LEFT JOIN ga4_country g
+    ON lup.user_pseudo_id = g.pseudo_user_id
+),
+
+metrics_per_delivery AS (
+  SELECT
+    delivery_id,
+
+    MAX(IF(metric IN ('opened', 'clicked'), email_client, NULL)) AS email_client,
+
+    MAX(IF(metric = 'sent', 1, 0)) AS sent,
+    MIN(IF(metric = 'sent', created_at, NULL)) AS sent_datetime,
+    MAX(IF(metric = 'sent', reason, NULL)) AS sent_reason,
+
+    MAX(IF(metric = 'attempted', 1, 0)) AS attempted,
+    MIN(IF(metric = 'attempted', created_at, NULL)) AS attempted_datetime,
+
+    MAX(IF(metric = 'delivered', 1, 0)) AS delivered,
+    MIN(IF(metric = 'delivered', created_at, NULL)) AS delivered_datetime,
+    MAX(IF(metric = 'delivered', reason, NULL)) AS delivered_reason,
+
+    MAX(IF(metric = 'opened', 1, 0)) AS opened,
+    MIN(IF(metric = 'opened', created_at, NULL)) AS opened_datetime,
+    MAX(IF(metric = 'opened', reason, NULL)) AS opened_reason,
+
+    MAX(IF(metric = 'clicked', 1, 0)) AS clicked,
+    MIN(IF(metric = 'clicked', created_at, NULL)) AS clicked_datetime,
+    MAX(IF(metric = 'clicked', reason, NULL)) AS clicked_reason,
+
+    MAX(IF(metric = 'bounced', 1, 0)) AS bounced,
+    MIN(IF(metric = 'bounced', created_at, NULL)) AS bounced_datetime,
+    MAX(IF(metric = 'bounced', reason, NULL)) AS bounced_reason,
+
+    MAX(IF(metric = 'dropped', 1, 0)) AS dropped,
+    MIN(IF(metric = 'dropped', created_at, NULL)) AS dropped_datetime,
+    MAX(IF(metric = 'dropped', reason, NULL)) AS dropped_reason,
+
+    MAX(IF(metric = 'failed', 1, 0)) AS failed,
+    MIN(IF(metric = 'failed', created_at, NULL)) AS failed_datetime,
+    MAX(IF(metric = 'failed', reason, NULL)) AS failed_reason,
+
+    MAX(IF(metric = 'undeliverable', 1, 0)) AS undeliverable,
+    MIN(IF(metric = 'undeliverable', created_at, NULL)) AS undeliverable_datetime,
+
+    MAX(IF(metric = 'drafted', 1, 0)) AS drafted,
+    MIN(IF(metric = 'drafted', created_at, NULL)) AS drafted_datetime,
+
+    MAX(IF(metric = 'unsubscribed', 1, 0)) AS unsubscribed,
+    MIN(IF(metric = 'unsubscribed', created_at, NULL)) AS unsubscribed_datetime,
+
+    MAX(IF(metric = 'spammed', 1, 0)) AS spam_reported,
+    MIN(IF(metric = 'spammed', created_at, NULL)) AS spam_reported_datetime
+
+  FROM `hotspawn-440312.customer_io_export._ext_metrics_v5`
+  WHERE delivery_id IS NOT NULL
+  GROUP BY delivery_id
+),
+
+delivery_subject AS (
+  SELECT
+    delivery_id,
+    ANY_VALUE(subject) AS subject_line
+  FROM `hotspawn-440312.customer_io_export._ext_delivery_contents_v5`
+  WHERE type = 'email'
+  GROUP BY delivery_id
+),
+
+deliveries_enriched AS (
+  SELECT
+    delivery_id,
+    internal_customer_id,
+    transactional_message_id,
+    delivery_date,
+    email_type,
+    campaign_name,
+    email_name
+  FROM (
+    SELECT
+      d.delivery_id,
+      d.internal_customer_id,
+      d.transactional_message_id,
+      DATE(d.created_at) AS delivery_date,
+
+      CASE
+        WHEN d.transactional_message_id IS NOT NULL THEN 'Transactional'
+        WHEN d.trigger_id IS NOT NULL THEN 'Broadcast'
+        WHEN d.newsletter_id IS NOT NULL THEN 'Broadcast'
+        WHEN d.campaign_id IS NOT NULL THEN 'Campaign'
+        ELSE 'Other'
+      END AS email_type,
+
+      COALESCE(c.name, b.name) AS campaign_name,
+      ca.name AS email_name,
+
+      ROW_NUMBER() OVER (
+        PARTITION BY d.delivery_id
+        ORDER BY d.seq_num DESC, d.created_at DESC
+      ) AS rn
+
+    FROM `hotspawn-440312.customer_io_export._ext_deliveries_v5` d
+
+    LEFT JOIN latest_campaigns c
+      ON d.campaign_id = c.campaign_id
+
+    LEFT JOIN `hotspawn-440312.customer_io_export._ext_broadcasts_v5` b
+      ON d.newsletter_id = b.broadcast_id
+
+    LEFT JOIN latest_campaign_actions ca
+      ON d.campaign_id = ca.campaign_id
+     AND d.action_id = ca.action_id
+
+    WHERE d.delivery_type = 'email'
+    ${when(incremental(), `
+      AND DATE(d.created_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
+    `, ``)}
+  )
+  WHERE rn = 1
+)
+
+SELECT
+  lup.user_pseudo_id,
+  d.internal_customer_id,
+  d.delivery_id,
+  m.email_client,
+  cpi.country,
+  d.email_type,
+
+  CASE
+    WHEN d.email_type = 'Transactional'
+      THEN 'Transactional'
+    ELSE d.campaign_name
+  END AS campaign_name,
+
+  CASE
+    WHEN d.email_type = 'Transactional'
+      THEN COALESCE(
+        s.subject_line,
+        CONCAT(
+          'Transactional message ',
+          CAST(d.transactional_message_id AS STRING)
+        )
+      )
+
+    WHEN d.email_type = 'Broadcast'
+      THEN COALESCE(
+        d.email_name,
+        s.subject_line
+      )
+
+    ELSE d.email_name
+  END AS email_name,
+
+  s.subject_line,
+
+  m.sent,
+  m.sent_datetime,
+  m.sent_reason,
+
+  m.attempted,
+  m.attempted_datetime,
+
+  m.delivered,
+  m.delivered_datetime,
+  m.delivered_reason,
+
+  m.opened,
+  m.opened_datetime,
+  m.opened_reason,
+
+  m.clicked,
+  m.clicked_datetime,
+  m.clicked_reason,
+
+  m.bounced,
+  m.bounced_datetime,
+  m.bounced_reason,
+
+  m.dropped,
+  m.dropped_datetime,
+  m.dropped_reason,
+
+  m.failed,
+  m.failed_datetime,
+  m.failed_reason,
+
+  m.undeliverable,
+  m.undeliverable_datetime,
+
+  m.drafted,
+  m.drafted_datetime,
+
+  m.unsubscribed,
+  m.unsubscribed_datetime,
+
+  m.spam_reported,
+  m.spam_reported_datetime,
+
+  d.delivery_date
+
+FROM deliveries_enriched d
+
+LEFT JOIN metrics_per_delivery m
+  ON d.delivery_id = m.delivery_id
+
+LEFT JOIN delivery_subject s
+  ON d.delivery_id = s.delivery_id
+
+LEFT JOIN latest_user_pseudo_id lup
+  ON d.internal_customer_id = lup.internal_customer_id
+
+LEFT JOIN country_per_internal_id cpi
+  ON d.internal_customer_id = cpi.internal_customer_id
