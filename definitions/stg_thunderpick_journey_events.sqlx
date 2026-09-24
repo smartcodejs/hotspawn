@@ -1,0 +1,347 @@
+config {
+  type: "incremental",
+  schema: "affiliate_reporting",
+  name: "stg_thunderpick_journey_events",
+  description: "Incremental staging of GA4 events required for the Hotspawn to Thunderpick journey model. Deduplicates GA4 daily and intraday events and preserves AFP and propagated Hotspawn identity.",
+  uniqueKey: ["event_key"],
+
+  bigquery: {
+    partitionBy: "event_date",
+    clusterBy: ["event_name", "afp"]
+  }
+}
+
+WITH ga4_source AS (
+
+  SELECT
+    _TABLE_SUFFIX AS source_table_suffix,
+
+    CASE
+      WHEN STARTS_WITH(_TABLE_SUFFIX, 'intraday_')
+        THEN 1
+      ELSE 0
+    END AS source_priority,
+
+    event_timestamp,
+
+    TIMESTAMP_MICROS(event_timestamp)
+      AS event_ts,
+
+    event_name,
+
+    user_pseudo_id,
+
+    event_bundle_sequence_id,
+
+    (
+      SELECT value.int_value
+      FROM UNNEST(event_params)
+      WHERE key = 'ga_session_id'
+      LIMIT 1
+    ) AS ga_session_id,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'page_location'
+      LIMIT 1
+    ) AS page_location,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'page_referrer'
+      LIMIT 1
+    ) AS page_referrer,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'destination_url'
+      LIMIT 1
+    ) AS destination_url,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'link_text'
+      LIMIT 1
+    ) AS link_text,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'lander_click_position'
+      LIMIT 1
+    ) AS lander_click_position,
+
+    (
+      SELECT COALESCE(
+        value.string_value,
+        CAST(value.int_value AS STRING)
+      )
+      FROM UNNEST(event_params)
+      WHERE key = 'afp'
+      LIMIT 1
+    ) AS event_afp,
+
+    COALESCE(
+      (
+        SELECT value.string_value
+        FROM UNNEST(event_params)
+        WHERE key = 'hs_ga4_pseudo_id'
+        LIMIT 1
+      ),
+      (
+        SELECT value.string_value
+        FROM UNNEST(event_params)
+        WHERE key = 'hotspawn_user_pseudo_id'
+        LIMIT 1
+      )
+    ) AS event_hotspawn_user_pseudo_id,
+
+    (
+      SELECT COALESCE(
+        value.string_value,
+        CAST(value.int_value AS STRING)
+      )
+      FROM UNNEST(event_params)
+      WHERE key = 'hs_ga4_session_id'
+      LIMIT 1
+    ) AS event_hotspawn_session_id,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'source_feature'
+      LIMIT 1
+    ) AS source_feature,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'source_page_url'
+      LIMIT 1
+    ) AS source_page_url
+
+  FROM
+    `hotspawn-440312.analytics_457395054.events_*`
+
+  WHERE
+    REGEXP_EXTRACT(
+      _TABLE_SUFFIX,
+      r'(\d{8})$'
+    )
+    BETWEEN
+
+    ${when(
+      incremental(),
+      "FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('Europe/Bratislava'), INTERVAL 3 DAY))",
+      "'20260701'"
+    )}
+
+    AND FORMAT_DATE(
+      '%Y%m%d',
+      CURRENT_DATE('Europe/Bratislava')
+    )
+
+    AND event_name IN (
+      'page_view',
+      'operator_click',
+      'thunderpick_operator_click'
+    )
+),
+
+/*
+Remove duplication between finalized GA4 daily tables
+and GA4 intraday tables.
+
+source_priority:
+0 = finalized daily table
+1 = intraday table
+
+The finalized version is preferred.
+*/
+ga4_deduplicated AS (
+
+  SELECT
+    * EXCEPT(source_priority)
+
+  FROM ga4_source
+
+  QUALIFY ROW_NUMBER() OVER (
+
+    PARTITION BY
+      event_timestamp,
+      event_name,
+      COALESCE(user_pseudo_id, ''),
+      COALESCE(
+        CAST(event_bundle_sequence_id AS STRING),
+        ''
+      ),
+      COALESCE(
+        CAST(ga_session_id AS STRING),
+        ''
+      ),
+      COALESCE(page_location, '')
+
+    ORDER BY source_priority
+
+  ) = 1
+),
+
+/*
+Normalise the AFP and propagated Hotspawn identity.
+*/
+normalized AS (
+
+  SELECT
+    *,
+
+    PARSE_DATE(
+      '%Y%m%d',
+      REGEXP_EXTRACT(
+        source_table_suffix,
+        r'(\d{8})$'
+      )
+    ) AS event_date,
+
+    LOWER(
+      NET.HOST(page_location)
+    ) AS hostname,
+
+    COALESCE(
+
+      event_afp,
+
+      REGEXP_EXTRACT(
+        page_location,
+        r'(?i)[?&]afp=([^&#]+)'
+      ),
+
+      REGEXP_EXTRACT(
+        destination_url,
+        r'(?i)[?&]afp=([^&#]+)'
+      ),
+
+      REGEXP_EXTRACT(
+        destination_url,
+        r'(?i)[?&]cxd=[^&#]*_(hs-vt-[^&#]+)'
+      )
+
+    ) AS afp,
+
+    COALESCE(
+
+      event_hotspawn_user_pseudo_id,
+
+      REGEXP_EXTRACT(
+        page_location,
+        r'(?i)[?&]hs_ga4_pseudo_id=([^&#]+)'
+      ),
+
+      REGEXP_EXTRACT(
+        page_location,
+        r'(?i)[?&]hotspawn_user_pseudo_id=([^&#]+)'
+      )
+
+    ) AS passed_hotspawn_user_pseudo_id,
+
+    SAFE_CAST(
+      COALESCE(
+
+        event_hotspawn_session_id,
+
+        REGEXP_EXTRACT(
+          page_location,
+          r'(?i)[?&]hs_ga4_session_id=([0-9]+)'
+        )
+
+      )
+      AS INT64
+    ) AS passed_hotspawn_session_id
+
+  FROM ga4_deduplicated
+),
+
+final AS (
+
+  SELECT
+
+    /*
+    Stable event-level key used by the Dataform MERGE.
+    */
+    TO_HEX(
+      SHA256(
+        CONCAT(
+          CAST(event_timestamp AS STRING),
+          '|',
+          COALESCE(event_name, ''),
+          '|',
+          COALESCE(user_pseudo_id, ''),
+          '|',
+          COALESCE(
+            CAST(event_bundle_sequence_id AS STRING),
+            ''
+          ),
+          '|',
+          COALESCE(
+            CAST(ga_session_id AS STRING),
+            ''
+          ),
+          '|',
+          COALESCE(page_location, '')
+        )
+      )
+    ) AS event_key,
+
+    event_date,
+    event_ts,
+    event_timestamp,
+
+    event_name,
+
+    user_pseudo_id,
+    ga_session_id,
+
+    event_bundle_sequence_id,
+
+    hostname,
+
+    page_location,
+    page_referrer,
+    destination_url,
+
+    link_text,
+    lander_click_position,
+
+    afp,
+
+    passed_hotspawn_user_pseudo_id,
+    passed_hotspawn_session_id,
+
+    source_feature,
+    source_page_url,
+
+    source_table_suffix
+
+  FROM normalized
+
+  /*
+  Keep only events that can participate in the
+  Thunderpick journey.
+  */
+  WHERE
+    afp IS NOT NULL
+
+    AND afp != '[afp]'
+
+    AND NOT STARTS_WITH(
+      afp,
+      'hs-vt-cloudrun-test-'
+    )
+
+)
+
+SELECT *
+FROM final
