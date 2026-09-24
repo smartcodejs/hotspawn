@@ -1,0 +1,263 @@
+config {
+  type: "incremental",
+  schema: "affiliate_reporting",
+  name: "stg_hotspawn_sessions_thunderpick",
+  description: "Incremental Hotspawn GA4 session staging used to enrich Thunderpick journeys with original Hotspawn session context.",
+
+  uniqueKey: ["session_key"],
+
+  bigquery: {
+    partitionBy: "session_date",
+    clusterBy: ["user_pseudo_id"]
+  }
+}
+
+WITH ga4_source AS (
+
+  SELECT
+    _TABLE_SUFFIX AS source_table_suffix,
+
+    CASE
+      WHEN STARTS_WITH(_TABLE_SUFFIX, 'intraday_')
+        THEN 1
+      ELSE 0
+    END AS source_priority,
+
+    event_timestamp,
+
+    TIMESTAMP_MICROS(event_timestamp)
+      AS event_ts,
+
+    user_pseudo_id,
+
+    event_bundle_sequence_id,
+
+    (
+      SELECT value.int_value
+      FROM UNNEST(event_params)
+      WHERE key = 'ga_session_id'
+      LIMIT 1
+    ) AS ga_session_id,
+
+    (
+      SELECT value.string_value
+      FROM UNNEST(event_params)
+      WHERE key = 'page_location'
+      LIMIT 1
+    ) AS page_location,
+
+    session_traffic_source_last_click
+      .cross_channel_campaign.source
+      AS session_source,
+
+    session_traffic_source_last_click
+      .cross_channel_campaign.medium
+      AS session_medium,
+
+    session_traffic_source_last_click
+      .cross_channel_campaign.campaign_name
+      AS session_campaign,
+
+    session_traffic_source_last_click
+      .cross_channel_campaign.default_channel_group
+      AS default_channel_group
+
+  FROM
+    `hotspawn-440312.analytics_457395054.events_*`
+
+  WHERE
+    (
+      _TABLE_SUFFIX BETWEEN
+
+        ${when(
+          incremental(),
+          "FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('Europe/Bratislava'), INTERVAL 3 DAY))",
+          "'20260701'"
+        )}
+
+        AND FORMAT_DATE(
+          '%Y%m%d',
+          CURRENT_DATE('Europe/Bratislava')
+        )
+
+      OR
+
+      _TABLE_SUFFIX BETWEEN
+
+        CONCAT(
+          'intraday_',
+          ${when(
+            incremental(),
+            "FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('Europe/Bratislava'), INTERVAL 3 DAY))",
+            "'20260701'"
+          )}
+        )
+
+        AND CONCAT(
+          'intraday_',
+          FORMAT_DATE(
+            '%Y%m%d',
+            CURRENT_DATE('Europe/Bratislava')
+          )
+        )
+    )
+
+    AND user_pseudo_id IS NOT NULL
+),
+
+/*
+Remove daily/intraday duplication.
+*/
+ga4_deduplicated AS (
+
+  SELECT
+    * EXCEPT(source_priority)
+
+  FROM ga4_source
+
+  QUALIFY ROW_NUMBER() OVER (
+
+    PARTITION BY
+      event_timestamp,
+      COALESCE(user_pseudo_id, ''),
+      COALESCE(
+        CAST(event_bundle_sequence_id AS STRING),
+        ''
+      ),
+      COALESCE(
+        CAST(ga_session_id AS STRING),
+        ''
+      ),
+      COALESCE(page_location, '')
+
+    ORDER BY source_priority
+
+  ) = 1
+),
+
+/*
+Keep only actual Hotspawn sessions.
+
+The Thunderpick lander domain is excluded.
+*/
+hotspawn_events AS (
+
+  SELECT
+    *,
+
+    LOWER(
+      NET.HOST(page_location)
+    ) AS hostname
+
+  FROM ga4_deduplicated
+
+  WHERE
+    ga_session_id IS NOT NULL
+),
+
+filtered AS (
+
+  SELECT *
+
+  FROM hotspawn_events
+
+  WHERE
+    hostname = 'hotspawn.com'
+    OR ENDS_WITH(
+      hostname,
+      '.hotspawn.com'
+    )
+),
+
+sessions AS (
+
+  SELECT
+
+    user_pseudo_id,
+
+    ga_session_id,
+
+    CONCAT(
+      user_pseudo_id,
+      '|',
+      CAST(ga_session_id AS STRING)
+    ) AS session_key,
+
+    DATE(
+      MIN(event_ts),
+      'Europe/Bratislava'
+    ) AS session_date,
+
+    COUNT(*) AS event_count,
+
+    MIN(event_ts)
+      AS session_start_ts,
+
+    MAX(event_ts)
+      AS session_last_event_ts,
+
+    ARRAY_AGG(
+      source_table_suffix
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS source_table,
+
+    ARRAY_AGG(
+      page_location
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS landing_page_url,
+
+    ARRAY_AGG(
+      page_location
+      IGNORE NULLS
+      ORDER BY event_ts DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS last_page_url,
+
+    ARRAY_AGG(
+      session_source
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS session_source,
+
+    ARRAY_AGG(
+      session_medium
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS session_medium,
+
+    ARRAY_AGG(
+      session_campaign
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS session_campaign,
+
+    ARRAY_AGG(
+      default_channel_group
+      IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS default_channel_group
+
+  FROM filtered
+
+  GROUP BY
+    user_pseudo_id,
+    ga_session_id
+)
+
+SELECT *
+FROM sessions
