@@ -1,11 +1,152 @@
+config {
+  type: "view",
+  schema: "dataform",
+  name: "cio_registration_profiles",
+  description: "Email-grain registered-user serving model for safe Customer.io activation. Includes only activation-ready Community, Personal and Pick'ems registrations.",
+  tags: ["registration", "activation", "customerio"]
+}
+
+WITH activation_ready AS (
+
+  SELECT
+    LOWER(TRIM(email)) AS email,
+    registration_id,
+    registration_type,
+    source_system,
+    valid_user_pseudo_id,
+    community_user_id,
+    registration_date
+
+  FROM ${ref("int_registration_cio_eligibility")}
+
+  WHERE cio_activation_ready = TRUE
+    AND email IS NOT NULL
+
+    -- Newsletter is intentionally excluded until authoritative
+    -- registration email persistence is available upstream.
+    AND registration_type IN (
+      'community_registration',
+      'personal_registration',
+      'pickems_registration'
+    )
+),
+
+profiles AS (
+
+  SELECT
+    email,
+
+    -- Registration activity
+    COUNT(*) AS registration_action_count,
+    COUNT(DISTINCT registration_id) AS distinct_registration_id_count,
+    COUNT(DISTINCT registration_type) AS registration_type_count,
+
+    STRING_AGG(
+      DISTINCT registration_type,
+      ', '
+      ORDER BY registration_type
+    ) AS registration_types,
+
+    STRING_AGG(
+      DISTINCT source_system,
+      ', '
+      ORDER BY source_system
+    ) AS source_systems,
+
+    -- Product / registration flags
+    COUNTIF(
+      registration_type = 'community_registration'
+    ) > 0 AS has_community_registration,
+
+    COUNTIF(
+      registration_type = 'personal_registration'
+    ) > 0 AS has_personal_registration,
+
+    COUNTIF(
+      registration_type = 'pickems_registration'
+    ) > 0 AS has_pickems_registration,
+
+    -- Registration counts
+    COUNTIF(
+      registration_type = 'community_registration'
+    ) AS community_registration_count,
+
+    COUNTIF(
+      registration_type = 'personal_registration'
+    ) AS personal_registration_count,
+
+    COUNTIF(
+      registration_type = 'pickems_registration'
+    ) AS pickems_registration_count,
+
+    -- Cross-source dates.
+    -- Date is used rather than inventing timestamps where Personal
+    -- and Pick'ems currently do not provide one.
+    MIN(registration_date) AS first_registration_date,
+    MAX(registration_date) AS latest_registration_date,
+
+    MIN(
+      IF(
+        registration_type = 'community_registration',
+        registration_date,
+        NULL
+      )
+    ) AS community_registration_date,
+
+    MIN(
+      IF(
+        registration_type = 'personal_registration',
+        registration_date,
+        NULL
+      )
+    ) AS personal_registration_date,
+
+    MIN(
+      IF(
+        registration_type = 'pickems_registration',
+        registration_date,
+        NULL
+      )
+    ) AS pickems_registration_date,
+
+    -- GA4 identity.
+    -- Keep a scalar pseudo ID only when exactly one distinct value
+    -- is associated with the registered email.
+    CASE
+      WHEN COUNT(DISTINCT valid_user_pseudo_id) = 1
+        THEN MAX(valid_user_pseudo_id)
+      ELSE NULL
+    END AS ga4_pseudo_id,
+
+    COUNT(
+      DISTINCT valid_user_pseudo_id
+    ) AS ga4_pseudo_id_count,
+
+    COUNT(
+      DISTINCT valid_user_pseudo_id
+    ) > 1 AS has_multiple_ga4_pseudo_ids,
+
+    -- Community identity follows the same non-guessing rule.
+    CASE
+      WHEN COUNT(DISTINCT community_user_id) = 1
+        THEN MAX(community_user_id)
+      ELSE NULL
+    END AS community_user_id,
+
+    COUNT(
+      DISTINCT community_user_id
+    ) AS community_user_id_count,
+
+    COUNT(
+      DISTINCT community_user_id
+    ) > 1 AS has_multiple_community_user_ids
+
+  FROM activation_ready
+
+  GROUP BY email
+)
+
 SELECT
-  registration_type,
-  COUNT(*) AS registrations,
-  COUNTIF(user_pseudo_id IS NOT NULL) AS with_pseudo_id,
-  COUNTIF(user_pseudo_id IS NULL) AS without_pseudo_id,
-  COUNT(DISTINCT user_pseudo_id) AS distinct_pseudo_ids,
-  MIN(registration_date) AS first_date,
-  MAX(registration_date) AS latest_date
-FROM `hotspawn-440312.dataform.fact_registrations`
-GROUP BY 1
-ORDER BY 1;
+  *
+
+FROM profiles
