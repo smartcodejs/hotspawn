@@ -3,6 +3,7 @@ config {
   schema: "affiliate_reporting",
   name: "stg_thunderpick_journey_events",
   description: "Incremental staging of GA4 events required for the Hotspawn to Thunderpick journey model. Deduplicates GA4 daily and intraday events and preserves AFP and propagated Hotspawn identity.",
+
   uniqueKey: ["event_key"],
 
   bigquery: {
@@ -128,21 +129,48 @@ WITH ga4_source AS (
     `hotspawn-440312.analytics_457395054.events_*`
 
   WHERE
-    REGEXP_EXTRACT(
-      _TABLE_SUFFIX,
-      r'(\d{8})$'
-    )
-    BETWEEN
+    (
+      /*
+      Finalized GA4 daily tables.
+      Direct _TABLE_SUFFIX filtering allows BigQuery
+      to prune unrelated wildcard tables.
+      */
+      _TABLE_SUFFIX BETWEEN
 
-    ${when(
-      incremental(),
-      "FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('Europe/Bratislava'), INTERVAL 3 DAY))",
-      "'20260701'"
-    )}
+        ${when(
+          incremental(),
+          "FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('Europe/Bratislava'), INTERVAL 3 DAY))",
+          "'20260701'"
+        )}
 
-    AND FORMAT_DATE(
-      '%Y%m%d',
-      CURRENT_DATE('Europe/Bratislava')
+        AND FORMAT_DATE(
+          '%Y%m%d',
+          CURRENT_DATE('Europe/Bratislava')
+        )
+
+      OR
+
+      /*
+      GA4 intraday tables.
+      */
+      _TABLE_SUFFIX BETWEEN
+
+        CONCAT(
+          'intraday_',
+          ${when(
+            incremental(),
+            "FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE('Europe/Bratislava'), INTERVAL 3 DAY))",
+            "'20260701'"
+          )}
+        )
+
+        AND CONCAT(
+          'intraday_',
+          FORMAT_DATE(
+            '%Y%m%d',
+            CURRENT_DATE('Europe/Bratislava')
+          )
+        )
     )
 
     AND event_name IN (
@@ -153,14 +181,14 @@ WITH ga4_source AS (
 ),
 
 /*
-Remove duplication between finalized GA4 daily tables
-and GA4 intraday tables.
+Remove duplication when the same GA4 event temporarily
+exists in both events_YYYYMMDD and events_intraday_YYYYMMDD.
 
-source_priority:
+Priority:
 0 = finalized daily table
 1 = intraday table
 
-The finalized version is preferred.
+The finalized daily version wins.
 */
 ga4_deduplicated AS (
 
@@ -191,7 +219,7 @@ ga4_deduplicated AS (
 ),
 
 /*
-Normalise the AFP and propagated Hotspawn identity.
+Normalise AFP and propagated Hotspawn identity.
 */
 normalized AS (
 
@@ -210,6 +238,9 @@ normalized AS (
       NET.HOST(page_location)
     ) AS hostname,
 
+    /*
+    Journey AFP.
+    */
     COALESCE(
 
       event_afp,
@@ -231,6 +262,9 @@ normalized AS (
 
     ) AS afp,
 
+    /*
+    Original Hotspawn GA4 client ID.
+    */
     COALESCE(
 
       event_hotspawn_user_pseudo_id,
@@ -247,6 +281,9 @@ normalized AS (
 
     ) AS passed_hotspawn_user_pseudo_id,
 
+    /*
+    Original Hotspawn GA4 session ID.
+    */
     SAFE_CAST(
       COALESCE(
 
@@ -296,12 +333,15 @@ final AS (
     ) AS event_key,
 
     event_date,
+
     event_ts,
+
     event_timestamp,
 
     event_name,
 
     user_pseudo_id,
+
     ga_session_id,
 
     event_bundle_sequence_id,
@@ -309,28 +349,29 @@ final AS (
     hostname,
 
     page_location,
+
     page_referrer,
+
     destination_url,
 
     link_text,
+
     lander_click_position,
 
     afp,
 
     passed_hotspawn_user_pseudo_id,
+
     passed_hotspawn_session_id,
 
     source_feature,
+
     source_page_url,
 
     source_table_suffix
 
   FROM normalized
 
-  /*
-  Keep only events that can participate in the
-  Thunderpick journey.
-  */
   WHERE
     afp IS NOT NULL
 
@@ -340,7 +381,6 @@ final AS (
       afp,
       'hs-vt-cloudrun-test-'
     )
-
 )
 
 SELECT *
