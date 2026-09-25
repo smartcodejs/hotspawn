@@ -1,8 +1,36 @@
 config {
   type: "table",
   schema: "affiliate_reporting",
-  name: "thunderpick_full_funnel_journey_df_test",
-  description: "Validation version of the Thunderpick full funnel from Hotspawn session through lander, operator click, registration and FTD. One row per AFP."
+  name: "thunderpick_full_funnel_journey",
+  description: "Thunderpick full funnel from Hotspawn session through lander, operator click, registration and FTD. One row per AFP.",
+
+  assertions: {
+    uniqueKey: ["afp"],
+
+    rowConditions: [
+      "afp IS NOT NULL",
+
+      "registration_postback_count >= 0",
+      "ftd_postback_count >= 0",
+
+      "NOT has_lander_visit OR lander_entry_ts IS NOT NULL",
+      "NOT has_operator_click OR first_operator_click_ts IS NOT NULL",
+      "NOT has_registration OR registration_received_at IS NOT NULL",
+      "NOT has_ftd OR ftd_received_at IS NOT NULL",
+
+      "registration_postback_count = 0 OR has_registration",
+      "ftd_postback_count = 0 OR has_ftd",
+
+      "first_operator_click_ts IS NULL OR last_operator_click_ts IS NULL OR first_operator_click_ts <= last_operator_click_ts",
+
+      "highest_funnel_stage IN ('0 - Unmatched', '1 - Hotspawn session', '2 - Lander visit', '3 - Operator click', '4 - Registration', '5 - FTD')",
+
+      "full_stitching_status IS NOT NULL",
+
+      "NOT STARTS_WITH(afp, 'hs-vt-test-')",
+      "NOT STARTS_WITH(afp, 'hs-vt-cloudrun-test-')"
+    ]
+  }
 }
 
 WITH valid_postbacks AS (
