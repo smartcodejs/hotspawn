@@ -2,7 +2,24 @@ config {
   type: "table",
   schema: "affiliate_reporting",
   name: "thunderpick_hs_lander_operator_journey",
-  description: "Unified Thunderpick journey from original Hotspawn session through lander to operator click. One row per production AFP."
+  description: "Unified Thunderpick journey from original Hotspawn session through lander to operator click. One row per production AFP.",
+
+  assertions: {
+    uniqueKey: ["afp"],
+
+
+    rowConditions: [
+        "afp IS NOT NULL",
+        "operator_click_count >= 0",
+        "lander_event_count IS NULL OR lander_page_view_count <= lander_event_count",
+        "NOT has_lander_visit OR lander_entry_ts IS NOT NULL",
+        "NOT has_operator_click OR first_operator_click_ts IS NOT NULL",
+        "first_operator_click_ts IS NULL OR last_operator_click_ts IS NULL OR first_operator_click_ts <= last_operator_click_ts",
+        "seconds_lander_to_operator IS NULL OR seconds_lander_to_operator >= 0",
+        "NOT STARTS_WITH(afp, 'hs-vt-test-')",
+        "NOT STARTS_WITH(afp, 'hs-vt-cloudrun-test-')"
+    ]
+  }
 }
 
 WITH events AS (
