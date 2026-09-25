@@ -1,0 +1,420 @@
+config {
+  type: "table",
+  schema: "affiliate_reporting",
+  name: "thunderpick_full_funnel_journey_df_test",
+  description: "Validation version of the Thunderpick full funnel from Hotspawn session through lander, operator click, registration and FTD. One row per AFP."
+}
+
+WITH valid_postbacks AS (
+
+  SELECT
+    received_at,
+    event_id,
+    event_type,
+    afp,
+    thunderpick_user_id,
+    tracking_code,
+    iso_country,
+    deposit_id,
+    transaction_sum_raw
+
+  FROM
+    `hotspawn-440312.affiliate_reporting.thunderpick_postbacks_deduplicated`
+
+  WHERE
+    afp IS NOT NULL
+
+    AND afp != '[afp]'
+
+    AND NOT STARTS_WITH(
+      afp,
+      'hs-vt-cloudrun-test-'
+    )
+
+    AND NOT STARTS_WITH(
+      afp,
+      'hs-vt-test-'
+    )
+),
+
+postbacks_by_afp AS (
+
+  SELECT
+    afp,
+
+    MIN(
+      IF(
+        event_type = 'registration',
+        received_at,
+        NULL
+      )
+    ) AS registration_received_at,
+
+    MIN(
+      IF(
+        event_type = 'ftd',
+        received_at,
+        NULL
+      )
+    ) AS ftd_received_at,
+
+    COUNTIF(
+      event_type = 'registration'
+    ) AS registration_postback_count,
+
+    COUNTIF(
+      event_type = 'ftd'
+    ) AS ftd_postback_count,
+
+    ARRAY_AGG(
+      thunderpick_user_id
+      IGNORE NULLS
+      ORDER BY received_at DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS thunderpick_user_id,
+
+    ARRAY_AGG(
+      tracking_code
+      IGNORE NULLS
+      ORDER BY received_at DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS tracking_code,
+
+    ARRAY_AGG(
+      iso_country
+      IGNORE NULLS
+      ORDER BY received_at DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS iso_country,
+
+    ARRAY_AGG(
+      IF(
+        event_type = 'ftd',
+        deposit_id,
+        NULL
+      )
+      IGNORE NULLS
+      ORDER BY received_at DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS deposit_id,
+
+    ARRAY_AGG(
+      IF(
+        event_type = 'ftd',
+        transaction_sum_raw,
+        NULL
+      )
+      IGNORE NULLS
+      ORDER BY received_at DESC
+      LIMIT 1
+    )[SAFE_OFFSET(0)]
+      AS transaction_sum_raw
+
+  FROM valid_postbacks
+
+  GROUP BY afp
+),
+
+all_afps AS (
+
+  SELECT
+    afp
+
+  FROM ${ref("thunderpick_hs_lander_operator_journey")}
+
+  UNION DISTINCT
+
+  SELECT
+    afp
+
+  FROM postbacks_by_afp
+),
+
+final AS (
+
+  SELECT
+    a.afp,
+
+    /*
+    Original Hotspawn identity.
+    Preserve the existing full-funnel schema:
+    raw GA session ID + combined session ID.
+    */
+    j.original_hotspawn_user_pseudo_id,
+
+    CAST(
+      j.original_hotspawn_session_id
+      AS STRING
+    ) AS original_hotspawn_ga_session_id,
+
+    CASE
+      WHEN
+        j.original_hotspawn_user_pseudo_id IS NOT NULL
+        AND j.original_hotspawn_session_id IS NOT NULL
+
+      THEN CONCAT(
+        j.original_hotspawn_user_pseudo_id,
+        '-',
+        CAST(
+          j.original_hotspawn_session_id
+          AS STRING
+        )
+      )
+
+      ELSE NULL
+    END AS original_hotspawn_session_id,
+
+    /*
+    Original Hotspawn session.
+    */
+    j.hotspawn_event_count,
+    j.hotspawn_session_start_ts,
+    j.hotspawn_last_event_before_lander_ts,
+    j.hotspawn_landing_page_url,
+    j.hotspawn_last_page_before_lander_url,
+    j.session_source,
+    j.session_medium,
+    j.session_campaign,
+    j.default_channel_group,
+
+    /*
+    Lander identity.
+    */
+    j.lander_user_pseudo_id,
+
+    CAST(
+      j.lander_session_id
+      AS STRING
+    ) AS lander_ga_session_id,
+
+    CASE
+      WHEN
+        j.lander_user_pseudo_id IS NOT NULL
+        AND j.lander_session_id IS NOT NULL
+
+      THEN CONCAT(
+        j.lander_user_pseudo_id,
+        '-',
+        CAST(
+          j.lander_session_id
+          AS STRING
+        )
+      )
+
+      ELSE NULL
+    END AS lander_session_id,
+
+    j.lander_entry_ts,
+    j.lander_event_count,
+    j.lander_page_view_count,
+    j.lander_source_table,
+    j.lander_page_url,
+    j.lander_page_referrer,
+    j.source_feature,
+    j.passed_source_page_url,
+
+    /*
+    Operator-click identity.
+    */
+    j.operator_click_user_pseudo_id,
+
+    CAST(
+      j.operator_click_session_id
+      AS STRING
+    ) AS operator_click_ga_session_id,
+
+    CASE
+      WHEN
+        j.operator_click_user_pseudo_id IS NOT NULL
+        AND j.operator_click_session_id IS NOT NULL
+
+      THEN CONCAT(
+        j.operator_click_user_pseudo_id,
+        '-',
+        CAST(
+          j.operator_click_session_id
+          AS STRING
+        )
+      )
+
+      ELSE NULL
+    END AS operator_click_session_id,
+
+    j.first_operator_click_ts,
+    j.last_operator_click_ts,
+
+    COALESCE(
+      j.operator_click_count,
+      0
+    ) AS operator_click_count,
+
+    j.operator_source_table,
+    j.operator_destination_url,
+    j.first_operator_link_text,
+    j.first_operator_click_position,
+
+    /*
+    Thunderpick conversion.
+    */
+    p.thunderpick_user_id,
+    p.tracking_code,
+    p.iso_country,
+    p.registration_received_at,
+    p.ftd_received_at,
+
+    COALESCE(
+      p.registration_postback_count,
+      0
+    ) AS registration_postback_count,
+
+    COALESCE(
+      p.ftd_postback_count,
+      0
+    ) AS ftd_postback_count,
+
+    p.deposit_id,
+    p.transaction_sum_raw,
+
+    /*
+    Journey timing.
+    */
+    j.seconds_hotspawn_to_lander,
+    j.seconds_lander_to_operator,
+
+    CASE
+      WHEN
+        p.registration_received_at IS NOT NULL
+        AND j.first_operator_click_ts IS NOT NULL
+
+      THEN TIMESTAMP_DIFF(
+        p.registration_received_at,
+        j.first_operator_click_ts,
+        SECOND
+      )
+
+      ELSE NULL
+    END AS seconds_operator_to_registration,
+
+    CASE
+      WHEN
+        p.ftd_received_at IS NOT NULL
+        AND p.registration_received_at IS NOT NULL
+
+      THEN TIMESTAMP_DIFF(
+        p.ftd_received_at,
+        p.registration_received_at,
+        SECOND
+      )
+
+      ELSE NULL
+    END AS seconds_registration_to_ftd,
+
+    /*
+    Funnel flags.
+    */
+    j.has_original_hotspawn_session,
+    j.has_lander_visit,
+    j.has_operator_click,
+
+    p.registration_received_at IS NOT NULL
+      AS has_registration,
+
+    p.ftd_received_at IS NOT NULL
+      AS has_ftd,
+
+    /*
+    Highest funnel stage.
+    */
+    CASE
+      WHEN p.ftd_received_at IS NOT NULL
+        THEN '5 - FTD'
+
+      WHEN p.registration_received_at IS NOT NULL
+        THEN '4 - Registration'
+
+      WHEN j.has_operator_click
+        THEN '3 - Operator click'
+
+      WHEN j.has_lander_visit
+        THEN '2 - Lander visit'
+
+      WHEN j.has_original_hotspawn_session
+        THEN '1 - Hotspawn session'
+
+      ELSE '0 - Unmatched'
+    END AS highest_funnel_stage,
+
+    /*
+    Diagnostic status.
+    */
+    CASE
+      WHEN
+        p.afp IS NOT NULL
+        AND j.afp IS NULL
+
+      THEN
+        'Postback received; GA4 journey not yet available'
+
+      WHEN j.original_hotspawn_user_pseudo_id IS NULL
+      THEN
+        'Missing original Hotspawn client ID'
+
+      WHEN j.original_hotspawn_session_id IS NULL
+      THEN
+        'Missing original Hotspawn GA session ID'
+
+      WHEN NOT j.has_original_hotspawn_session
+      THEN
+        'Original IDs found, but Hotspawn session missing'
+
+      WHEN NOT j.has_lander_visit
+      THEN
+        'Hotspawn session found, but lander missing'
+
+      WHEN
+        NOT j.has_operator_click
+        AND p.registration_received_at IS NOT NULL
+
+      THEN
+        'Registration found, but operator click is missing'
+
+      WHEN NOT j.has_operator_click
+      THEN
+        'Hotspawn + lander found, operator click missing'
+
+      WHEN
+        p.ftd_received_at IS NOT NULL
+        AND p.registration_received_at IS NULL
+
+      THEN
+        'FTD received without Registration postback'
+
+      WHEN p.ftd_received_at IS NOT NULL
+      THEN
+        'Fully stitched: Hotspawn → lander → operator → Registration → FTD'
+
+      WHEN p.registration_received_at IS NOT NULL
+      THEN
+        'Fully stitched: Hotspawn → lander → operator → Registration'
+
+      ELSE
+        'Fully stitched to operator; awaiting conversion'
+    END AS full_stitching_status
+
+  FROM all_afps AS a
+
+  LEFT JOIN
+    ${ref("thunderpick_hs_lander_operator_journey")} AS j
+
+    ON a.afp = j.afp
+
+  LEFT JOIN postbacks_by_afp AS p
+    ON a.afp = p.afp
+)
+
+SELECT *
+FROM final
