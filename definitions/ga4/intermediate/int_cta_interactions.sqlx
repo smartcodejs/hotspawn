@@ -1,0 +1,94 @@
+config {
+  type: "view",
+  schema: dataform.projectConfig.vars.schema,
+  tags: ["ga4","intermediate","cta"]
+}
+
+WITH base AS (
+  SELECT
+    event_ts,
+    event_date,
+    event_name,
+
+    user_pseudo_id,
+    ga_session_id,
+    batch_page_id,
+
+    page_url,
+    page_title,
+
+    cta_name,
+    cta_type,
+    cta_location,
+    destination_url
+
+  FROM ${ref("raw_cta_source")}
+),
+
+deduplicated AS (
+  SELECT
+    event_date,
+
+    user_pseudo_id,
+    ga_session_id,
+    batch_page_id,
+
+    page_url,
+
+    ARRAY_AGG(
+      page_title IGNORE NULLS
+      ORDER BY event_ts
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS page_title,
+
+    cta_name,
+    cta_type,
+    cta_location,
+    destination_url,
+
+    MIN(
+      CASE
+        WHEN event_name = 'cta_impression'
+        THEN event_ts
+      END
+    ) AS first_impression_ts,
+
+    MIN(
+      CASE
+        WHEN event_name = 'cta_click'
+        THEN event_ts
+      END
+    ) AS first_click_ts,
+
+    MAX(
+      CASE
+        WHEN event_name = 'cta_impression'
+        THEN 1
+        ELSE 0
+      END
+    ) AS impression,
+
+    MAX(
+      CASE
+        WHEN event_name = 'cta_click'
+        THEN 1
+        ELSE 0
+      END
+    ) AS click
+
+  FROM base
+
+  GROUP BY
+    event_date,
+    user_pseudo_id,
+    ga_session_id,
+    batch_page_id,
+    page_url,
+    cta_name,
+    cta_type,
+    cta_location,
+    destination_url
+)
+
+SELECT *
+FROM deduplicated
