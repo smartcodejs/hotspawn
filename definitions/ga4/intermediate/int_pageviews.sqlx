@@ -13,6 +13,7 @@ WITH pv AS (
   SELECT
     session_date,
     user_pseudo_id,
+
     CONCAT(
       user_pseudo_id,
       '-',
@@ -130,6 +131,8 @@ SELECT
   NULL AS max_scroll_percentage,
   NULL AS max_time_on_page,
 
+  pageview_time,
+  batch_page_id,
   pageview_number,
   next_page_url,
 
