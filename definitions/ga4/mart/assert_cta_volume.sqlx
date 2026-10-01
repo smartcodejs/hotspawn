@@ -1,0 +1,58 @@
+config {
+  type: "assertion",
+  tags: ["ga4","mart","cta","quality"]
+}
+
+WITH daily AS (
+  SELECT
+    date,
+    COUNT(*) AS cta_rows
+  FROM ${ref("mart_cta_interactions")}
+  WHERE date BETWEEN
+    DATE_SUB(
+      CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+      INTERVAL 8 DAY
+    )
+    AND DATE_SUB(
+      CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+      INTERVAL 1 DAY
+    )
+  GROUP BY date
+),
+
+baseline AS (
+  SELECT
+    AVG(cta_rows) AS avg_previous_7_days
+  FROM daily
+  WHERE date BETWEEN
+    DATE_SUB(
+      CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+      INTERVAL 8 DAY
+    )
+    AND DATE_SUB(
+      CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+      INTERVAL 2 DAY
+    )
+),
+
+yesterday AS (
+  SELECT
+    COALESCE(MAX(cta_rows), 0) AS yesterday_rows
+  FROM daily
+  WHERE date = DATE_SUB(
+    CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+    INTERVAL 1 DAY
+  )
+)
+
+SELECT
+  y.yesterday_rows,
+  b.avg_previous_7_days
+
+FROM yesterday y
+CROSS JOIN baseline b
+
+WHERE
+  b.avg_previous_7_days IS NOT NULL
+  AND b.avg_previous_7_days > 0
+  AND y.yesterday_rows < b.avg_previous_7_days * 0.3
