@@ -1,0 +1,21 @@
+config {
+  type: "assertion",
+  tags: ["ga4","mart","cta","quality"]
+}
+
+SELECT
+  1 AS assertion_failure
+
+FROM (
+  SELECT
+    COUNT(*) AS row_count,
+    MAX(date) AS max_date
+  FROM ${ref("mart_cta_interactions")}
+)
+
+WHERE
+  row_count = 0
+  OR max_date < DATE_SUB(
+    CURRENT_DATE('${dataform.projectConfig.vars.tz}'),
+    INTERVAL 1 DAY
+  )

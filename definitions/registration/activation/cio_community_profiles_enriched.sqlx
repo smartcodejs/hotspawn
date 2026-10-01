@@ -4,24 +4,86 @@ config {
 }
 
 SELECT
-  c.*,
+  c.* EXCEPT (
+    ga4_user_pseudo_id,
+    hotspawn_identity_status,
+    hotspawn_enrichment_status,
+    hotspawn_identity_first_seen,
+    hotspawn_identity_last_seen,
+    acquisition_channel,
+    acquisition_source,
+    country,
+    device_type,
+    total_sessions,
+    personal_registered,
+    pickems_registered,
+    newsletter_subscribed
+  ),
 
-  p.user_pseudo_id AS ga4_user_pseudo_id,
-  p.identity_status AS hotspawn_identity_status,
-  p.enrichment_status AS hotspawn_enrichment_status,
+  COALESCE(
+    p.user_pseudo_id,
+    c.ga4_user_pseudo_id
+  ) AS ga4_user_pseudo_id,
 
-  p.hotspawn_identity_first_seen,
-  p.hotspawn_identity_last_seen,
+  COALESCE(
+    p.identity_status,
+    c.hotspawn_identity_status
+  ) AS hotspawn_identity_status,
 
-  p.acquisition_channel,
-  p.acquisition_source,
-  p.country,
-  p.device_type,
-  p.total_sessions,
+  COALESCE(
+    p.enrichment_status,
+    c.hotspawn_enrichment_status
+  ) AS hotspawn_enrichment_status,
 
-  p.personal_registered,
-  p.pickems_registered,
-  p.newsletter_subscribed
+  COALESCE(
+    p.hotspawn_identity_first_seen,
+    c.hotspawn_identity_first_seen
+  ) AS hotspawn_identity_first_seen,
+
+  COALESCE(
+    p.hotspawn_identity_last_seen,
+    c.hotspawn_identity_last_seen
+  ) AS hotspawn_identity_last_seen,
+
+  COALESCE(
+    p.acquisition_channel,
+    c.acquisition_channel
+  ) AS acquisition_channel,
+
+  COALESCE(
+    p.acquisition_source,
+    c.acquisition_source
+  ) AS acquisition_source,
+
+  COALESCE(
+    p.country,
+    c.country
+  ) AS country,
+
+  COALESCE(
+    p.device_type,
+    c.device_type
+  ) AS device_type,
+
+  COALESCE(
+    p.total_sessions,
+    c.total_sessions
+  ) AS total_sessions,
+
+  COALESCE(
+    p.personal_registered,
+    c.personal_registered
+  ) AS personal_registered,
+
+  COALESCE(
+    p.pickems_registered,
+    c.pickems_registered
+  ) AS pickems_registered,
+
+  COALESCE(
+    p.newsletter_subscribed,
+    c.newsletter_subscribed
+  ) AS newsletter_subscribed
 
 FROM ${ref("cio_community_profiles")} c
 
