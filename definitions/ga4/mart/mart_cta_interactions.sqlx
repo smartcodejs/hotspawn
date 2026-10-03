@@ -1,18 +1,23 @@
 config {
   type: "incremental",
   schema: dataform.projectConfig.vars.schema,
-  tags: ["ga4","mart","cta"],
+  tags: ["ga4", "mart", "cta"],
+
   bigquery: {
     partitionBy: "date",
-    clusterBy: ["user_pseudo_id","session_id"]
+    clusterBy: ["user_pseudo_id", "session_id"]
   },
+
   uniqueKey: ["cta_interaction_key"],
+
   assertions: {
     uniqueKey: ["cta_interaction_key"],
+
     nonNull: [
       "cta_interaction_key",
       "date"
     ],
+
     rowConditions: [
       "impression IN (0, 1)",
       "click IN (0, 1)",
@@ -22,6 +27,7 @@ config {
 }
 
 WITH cta AS (
+
   SELECT
     event_date,
     user_pseudo_id,
@@ -29,12 +35,15 @@ WITH cta AS (
     batch_page_id,
     page_url,
     page_title,
+
     cta_name,
     cta_type,
     cta_location,
     destination_url,
+
     first_impression_ts,
     first_click_ts,
+
     impression,
     click
 
@@ -53,6 +62,7 @@ WITH cta AS (
 ),
 
 cta_with_event_time AS (
+
   SELECT
     *,
 
@@ -65,6 +75,7 @@ cta_with_event_time AS (
 ),
 
 candidate_matches AS (
+
   SELECT
     cta.event_date,
 
@@ -87,12 +98,15 @@ candidate_matches AS (
 
     cta.first_impression_ts,
     cta.first_click_ts,
+
     cta.impression,
     cta.click,
+
     cta.cta_event_time,
 
     pv.pageview_number,
     pv.pageview_time,
+
     pv.page_title AS pv_page_title,
     pv.page_category AS pv_page_category,
     pv.theme_category AS pv_theme_category,
@@ -109,20 +123,24 @@ candidate_matches AS (
 
   LEFT JOIN ${ref("int_pageviews")} pv
     ON cta.user_pseudo_id = pv.user_pseudo_id
+
     AND CONCAT(
       cta.user_pseudo_id,
       '-',
       CAST(cta.ga_session_id AS STRING)
     ) = pv.session_id
+
     AND cta.batch_page_id = pv.batch_page_id
 ),
 
 best_match AS (
+
   SELECT *
 
   FROM candidate_matches
 
   QUALIFY ROW_NUMBER() OVER (
+
     PARTITION BY
       event_date,
       session_id,
@@ -132,17 +150,23 @@ best_match AS (
       cta_type,
       cta_location,
       destination_url
+
     ORDER BY
+
       CASE
         WHEN pageview_number IS NOT NULL THEN 0
         ELSE 1
       END,
+
       time_distance_ms,
+
       pageview_number
+
   ) = 1
 ),
 
 enriched AS (
+
   SELECT
     event_date,
     session_id,
@@ -157,8 +181,17 @@ enriched AS (
       page_title
     ) AS page_title,
 
+    /*
+      Page category
+
+      Prefer the pageview taxonomy.
+
+      If no pageview match exists, fall back
+      to parsing the CTA page URL.
+    */
     COALESCE(
       pv_page_category,
+
       COALESCE(
         NULLIF(
           REGEXP_EXTRACT(
@@ -171,8 +204,17 @@ enriched AS (
       )
     ) AS page_category,
 
+    /*
+      Theme category
+
+      Prefer the pageview taxonomy.
+
+      If no pageview match exists, use the
+      first URL path component.
+    */
     COALESCE(
       pv_theme_category,
+
       COALESCE(
         NULLIF(
           REGEXP_EXTRACT(
@@ -186,8 +228,41 @@ enriched AS (
     ) AS theme_category,
 
     cta_name,
-    cta_type,
 
+    /*
+      CTA type
+
+      Keep the tracked CTA type when present.
+
+      Historical lander events did not populate
+      cta_type, so classify the two known
+      lander implementations from page_url.
+    */
+    CASE
+
+      WHEN cta_type IS NOT NULL
+        AND TRIM(cta_type) != ''
+        THEN cta_type
+
+      WHEN REGEXP_CONTAINS(
+        LOWER(page_url),
+        r'^https?://(www\.)?hotspawn\.com/landers/'
+      )
+        THEN 'lander'
+
+      WHEN REGEXP_CONTAINS(
+        LOWER(page_url),
+        r'^https?://go\.hotspawn\.com/'
+      )
+        THEN 'lander'
+
+      ELSE NULL
+
+    END AS cta_type,
+
+    /*
+      Destination classification
+    */
     COALESCE(
       NULLIF(
         REGEXP_EXTRACT(
@@ -204,16 +279,44 @@ enriched AS (
 
     first_impression_ts,
     first_click_ts,
-    impression,
-    click
+
+    /*
+      Reporting rule:
+
+      A CTA click is also evidence that the CTA
+      was exposed to the user.
+
+      Raw GA4 remains unchanged.
+
+      This mainly repairs historical lander rows
+      where cta_click existed before
+      cta_impression tracking was implemented.
+    */
+    GREATEST(
+      COALESCE(impression, 0),
+      COALESCE(click, 0)
+    ) AS impression,
+
+    COALESCE(
+      click,
+      0
+    ) AS click
 
   FROM best_match
 ),
 
 final AS (
+
   SELECT
     event_date AS date,
 
+    /*
+      Stable CTA interaction key.
+
+      Note that cta_type is part of the key.
+      Historical lander rows therefore require
+      a controlled rebuild after this change.
+    */
     TO_HEX(
       SHA256(
         TO_JSON_STRING(
@@ -222,10 +325,26 @@ final AS (
             session_id AS session_id,
             batch_page_id AS batch_page_id,
             page_url AS page_url,
-            COALESCE(cta_name, '') AS cta_name,
-            COALESCE(cta_type, '') AS cta_type,
-            COALESCE(cta_location, '') AS cta_location,
-            COALESCE(destination_url, '') AS destination_url
+
+            COALESCE(
+              cta_name,
+              ''
+            ) AS cta_name,
+
+            COALESCE(
+              cta_type,
+              ''
+            ) AS cta_type,
+
+            COALESCE(
+              cta_location,
+              ''
+            ) AS cta_location,
+
+            COALESCE(
+              destination_url,
+              ''
+            ) AS destination_url
           )
         )
       )
@@ -249,6 +368,7 @@ final AS (
 
     first_impression_ts,
     first_click_ts,
+
     impression,
     click
 
