@@ -1,0 +1,95 @@
+config {
+  type: "table",
+  database: "hotspawn-440312",
+  schema: "reddit_ads",
+  name: "ad_insight",
+
+  tags: [
+    "reddit_ads_daily"
+  ],
+
+  assertions: {
+    uniqueKey: [
+      "date",
+      "ad_group_id",
+      "ad_id"
+    ],
+
+    nonNull: [
+      "date",
+      "ad_id"
+    ]
+  },
+
+  description: "Daily Reddit Ads performance enriched with ad, ad group, campaign and account metadata."
+}
+
+SELECT
+  p.date,
+
+  -- Account
+  aacct.id AS account_id,
+  aacct.name AS account_name,
+  aacct.currency AS account_currency,
+  aacct.time_zone_id AS account_time_zone,
+
+  -- Campaign
+  c.id AS campaign_id,
+  c.name AS campaign_name,
+  c.objective AS campaign_objective,
+  c.configured_status AS campaign_configured_status,
+  c.delivery_status AS campaign_delivery_status,
+  c.effective_status AS campaign_effective_status,
+
+  -- Ad group
+  ag.id AS ad_group_id,
+  ag.name AS ad_group_name,
+  ag.bid_type,
+  ag.bid_value,
+  ag.goal_type,
+  ag.goal_value,
+  ag.optimization_goal,
+  ag.configured_status AS ad_group_configured_status,
+  ag.delivery_status AS ad_group_delivery_status,
+  ag.effective_status AS ad_group_effective_status,
+
+  -- Ad
+  a.id AS ad_id,
+  a.name AS ad_name,
+  a.type AS ad_type,
+  a.click_url,
+  a.profile_username,
+  a.configured_status AS ad_configured_status,
+  a.delivery_status AS ad_delivery_status,
+  a.effective_status AS ad_effective_status,
+
+  -- Performance
+  p.impressions,
+  p.clicks,
+  p.spend,
+  p.cpc,
+  p.cpm,
+  p.ctr,
+
+  -- Raw API metrics
+  p.spend_micros,
+  p.cpc_micros,
+  p.ecpm_micros,
+
+  -- Metadata
+  p.metrics_updated_at,
+  CURRENT_TIMESTAMP() AS table_updated_at
+
+FROM ${ref("ad_performance_raw")} p
+
+LEFT JOIN ${ref("ad")} a
+  ON p.ad_id = a.id
+
+LEFT JOIN ${ref("ad_group")} ag
+  ON p.ad_group_id = ag.id
+
+LEFT JOIN ${ref("campaign")} c
+  ON a.campaign_id = c.id
+
+LEFT JOIN ${ref("ad_account")} aacct
+  ON a.ad_account_id = aacct.id
