@@ -68,10 +68,15 @@ SELECT
 
   user_pseudo_id,
 
+--- Updated 11.10.2026
   CASE
-    WHEN LOWER(signup_status) LIKE 'success%' THEN 'success'
-    ELSE LOWER(signup_status)
+    WHEN signup_status IS NULL OR TRIM(signup_status) = ''
+      THEN 'unknown'
+    WHEN LOWER(TRIM(signup_status)) LIKE 'success%'
+      THEN 'success'
+    ELSE LOWER(TRIM(signup_status))
   END AS registration_status,
+
 
   signup_status AS source_signup_status,
 
