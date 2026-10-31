@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: "hotspawn-440312",
+  schema: "analytics_457395054",
+  name: "session_view_level_schema_volume_3",
+  description: "Tableau-facing session table (Pippa). Written by publish_session_view_level_schema_volume_3 from ga4_production.int_session_view. Read by Tableau, fact_pickem_sessions_with_interactions and affiliate_reporting.operator_conversion_events. Never drop or recreate."
+}
