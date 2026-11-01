@@ -1,0 +1,33 @@
+config {
+  type: "operations",
+  description: "Daily publish: writes the refresh window (last 3 days + today) of ga4_production.int_session_view into the Tableau table analytics_457395054.session_view_level_schema_volume_3. Same columns, same order; the table object is never dropped or recreated. Runs in production_daily_refresh (All actions, 12:00 UTC). Replaced the 11:00 UTC scheduled query on 1 Nov 2026.",
+  dependencies: ["int_session_view"],
+  // Do not publish if any int_session_view assertion fails.
+  dependOnDependencyAssertions: true,
+  tags: ["sessions", "hotspawn", "daily"]
+}
+
+BEGIN TRANSACTION;
+
+DELETE FROM ${ref("session_view_level_schema_volume_3")}
+WHERE date >= ${metric_definitions.refreshStart()};
+
+INSERT INTO ${ref("session_view_level_schema_volume_3")} (
+  date, site_name, session_time, user_pseudo_id, session_id,
+  country, device, platform, user_type,
+  channel_grouping, session_source, session_medium, session_campaign,
+  engaged_session, bounces, page_view,
+  user_signup, newsletter_signup, user_login,
+  login_auth_method, login_provider
+)
+SELECT
+  date, site_name, session_time, user_pseudo_id, session_id,
+  country, device, platform, user_type,
+  channel_grouping, session_source, session_medium, session_campaign,
+  engaged_session, bounces, page_view,
+  user_signup, newsletter_signup, user_login,
+  login_auth_method, login_provider
+FROM ${ref("int_session_view")}
+WHERE date >= ${metric_definitions.refreshStart()};
+
+COMMIT TRANSACTION;
