@@ -10,7 +10,7 @@ config {
     nonNull: ["registration_id", "registration_date", "registration_timestamp", "user_pseudo_id"]
   },
   tags: ["registration", "staging", "pickems"],
-  description: "Pick'ems registrations, one row per browser per day. Pick'ems is decided from GA4 user_signup: signup_source = 'pickems' with a success status (history) OR pickems_registered = true (DEV-R6, from deploy). Validated 2 Nov 2026: 252 TWC sign-ups (10–18 Oct, excl. QA) = reporting.rpt_pickems_registrations. Incremental: full build from 2026-07-01 (first sign-up 2026-07-24), daily runs read the last 4 days."
+  description: "Pick'ems registrations, one row per browser per day. Pick'ems is decided from GA4 user_signup on play.hotspawn.com / www.hotspawn.com (localhost and other test hosts excluded), when ANY of: (1) early tracking (Jul 2026, before signup_source existed): form_id = 'pickems_signup' with a success status; (2) history: signup_source = 'pickems' with a success status; (3) DEV-R6, from deploy: pickems_registered = true. Validated 2 Nov 2026: 252 TWC sign-ups (10–18 Oct, excl. QA) = reporting.rpt_pickems_registrations. Early-tracking condition added 2 Nov 2026 (DE-03): +13 July registrations that were counted nowhere. Incremental: full build from 2026-07-01 (first sign-up 2026-07-24), daily runs read the last 4 days."
 }
 
 WITH ga4_signups AS (
@@ -23,6 +23,12 @@ WITH ga4_signups AS (
     (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'signup_status') AS ga4_signup_status,
     (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'auth_method')   AS ga4_auth_method,
     (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'provider')      AS ga4_provider,
+
+    -- ADDED 2 Nov 2026 (DE-03): early tracking, Jul 2026, before signup_source existed.
+    -- These sign-ups carry form_id = 'pickems_signup' and status 'Success' / 'SuccessSuccess', no signup_source.
+    LOWER(IFNULL((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'form_id'), '')) = 'pickems_signup'
+      AND STARTS_WITH(LOWER(IFNULL((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'signup_status'), '')), 'success')
+      AS is_early_pickems_signup,
 
     LOWER(IFNULL((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'signup_source'), '')) = 'pickems'
       AND STARTS_WITH(LOWER(IFNULL((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'signup_status'), '')), 'success')
@@ -57,7 +63,8 @@ pickems AS (
     LOGICAL_OR(is_new_pickems_registration) AS has_new_flag
 
   FROM ga4_signups
-  WHERE is_legacy_pickems_signup OR is_new_pickems_registration
+  -- CHANGED 2 Nov 2026 (DE-03): added is_early_pickems_signup
+  WHERE is_early_pickems_signup OR is_legacy_pickems_signup OR is_new_pickems_registration
   GROUP BY signup_date, user_pseudo_id
 ),
 
