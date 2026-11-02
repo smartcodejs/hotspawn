@@ -1,9 +1,67 @@
 config {
-  type: "view",
-  tags: ["registration", "staging", "pickems"]
+  type: "incremental",
+  uniqueKey: ["registration_id"],
+  bigquery: {
+    partitionBy: "registration_date",
+    updatePartitionFilter: "registration_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)"
+  },
+  assertions: {
+    uniqueKey: ["registration_id"],
+    nonNull: ["registration_id", "registration_date", "registration_timestamp", "user_pseudo_id"]
+  },
+  tags: ["registration", "staging", "pickems"],
+  description: "Pick'ems registrations, one row per browser per day. Pick'ems is decided from GA4 user_signup: signup_source = 'pickems' with a success status (history) OR pickems_registered = true (DEV-R6, from deploy). Validated 2 Nov 2026: 252 TWC sign-ups (10–18 Oct, excl. QA) = reporting.rpt_pickems_registrations. Incremental: full build from 2026-07-01 (first sign-up 2026-07-24), daily runs read the last 4 days."
 }
 
-WITH source_rows AS (
+WITH ga4_signups AS (
+
+  SELECT
+    PARSE_DATE('%Y%m%d', event_date) AS signup_date,
+    user_pseudo_id,
+    TIMESTAMP_MICROS(event_timestamp) AS event_ts,
+
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'signup_status') AS ga4_signup_status,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'auth_method')   AS ga4_auth_method,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'provider')      AS ga4_provider,
+
+    LOWER(IFNULL((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'signup_source'), '')) = 'pickems'
+      AND STARTS_WITH(LOWER(IFNULL((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'signup_status'), '')), 'success')
+      AS is_legacy_pickems_signup,
+
+    LOWER(COALESCE(
+      (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'pickems_registered'),
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'pickems_registered') AS STRING),
+      '')) IN ('true', '1')
+      AS is_new_pickems_registration
+
+  FROM `hotspawn-440312.analytics_457395054.events_*`
+
+  WHERE _TABLE_SUFFIX >= ${when(incremental(),
+          "FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY))",
+          "'20260701'")}
+    AND _TABLE_SUFFIX NOT LIKE 'intraday%'
+    AND event_name = 'user_signup'
+    AND user_pseudo_id IS NOT NULL
+    AND device.web_info.hostname IN ('play.hotspawn.com', 'www.hotspawn.com')
+),
+
+pickems AS (
+
+  SELECT
+    signup_date,
+    user_pseudo_id,
+    MIN(event_ts) AS registration_timestamp,
+    ARRAY_AGG(ga4_signup_status IGNORE NULLS ORDER BY event_ts LIMIT 1)[SAFE_OFFSET(0)] AS ga4_signup_status,
+    ARRAY_AGG(ga4_auth_method   IGNORE NULLS ORDER BY event_ts LIMIT 1)[SAFE_OFFSET(0)] AS ga4_auth_method,
+    ARRAY_AGG(ga4_provider      IGNORE NULLS ORDER BY event_ts LIMIT 1)[SAFE_OFFSET(0)] AS ga4_provider,
+    LOGICAL_OR(is_new_pickems_registration) AS has_new_flag
+
+  FROM ga4_signups
+  WHERE is_legacy_pickems_signup OR is_new_pickems_registration
+  GROUP BY signup_date, user_pseudo_id
+),
+
+attributes AS (
 
   SELECT
     signup_date,
@@ -19,20 +77,13 @@ WITH source_rows AS (
 
   FROM ${ref("user_signup_schema")}
 
-  WHERE pickems_signup = 1
-),
-
-deduped AS (
-
-  SELECT *
-  FROM source_rows
-
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY
       signup_date,
       user_pseudo_id
 
     ORDER BY
+      CASE WHEN pickems_signup = 1 THEN 0 ELSE 1 END,
       CASE WHEN signup_status IS NOT NULL THEN 0 ELSE 1 END,
       CASE WHEN signup_method IS NOT NULL THEN 0 ELSE 1 END,
       CASE WHEN signup_provider IS NOT NULL THEN 0 ELSE 1 END,
@@ -47,50 +98,52 @@ SELECT
     SHA256(
       CONCAT(
         'pickems_registration|',
-        CAST(signup_date AS STRING),
+        CAST(p.signup_date AS STRING),
         '|',
-        COALESCE(user_pseudo_id, 'no_pseudo_id')
+        COALESCE(p.user_pseudo_id, 'no_pseudo_id')
       )
     )
   ) AS registration_id,
 
-  signup_date AS registration_date,
+  p.signup_date AS registration_date,
 
-  CAST(NULL AS TIMESTAMP) AS registration_timestamp,
+  p.registration_timestamp,
 
   'pickems_registration' AS registration_type,
 
   'pickems' AS source_system,
 
-  'analytics_457395054.user_signup_schema' AS source_table,
+  'analytics_457395054.events_*' AS source_table,
 
   'user_signup' AS source_event,
 
-  user_pseudo_id,
+  p.user_pseudo_id,
 
---- Updated 11.10.2026
   CASE
-    WHEN signup_status IS NULL OR TRIM(signup_status) = ''
-      THEN 'unknown'
-    WHEN LOWER(TRIM(signup_status)) LIKE 'success%'
-      THEN 'success'
-    ELSE LOWER(TRIM(signup_status))
+    WHEN p.has_new_flag THEN 'success'
+    WHEN COALESCE(p.ga4_signup_status, a.signup_status) IS NULL
+      OR TRIM(COALESCE(p.ga4_signup_status, a.signup_status)) = '' THEN 'unknown'
+    WHEN LOWER(TRIM(COALESCE(p.ga4_signup_status, a.signup_status))) LIKE 'success%' THEN 'success'
+    ELSE LOWER(TRIM(COALESCE(p.ga4_signup_status, a.signup_status)))
   END AS registration_status,
 
+  COALESCE(p.ga4_signup_status, a.signup_status) AS source_signup_status,
 
-  signup_status AS source_signup_status,
+  COALESCE(a.signup_method,   p.ga4_auth_method) AS signup_method,
+  COALESCE(a.signup_provider, p.ga4_provider)    AS signup_provider,
 
-  signup_method,
-  signup_provider,
+  a.acquisition_channel,
+  a.acquisition_source,
+  a.country,
+  a.device_type,
+  a.total_sessions,
 
-  acquisition_channel,
-  acquisition_source,
-  country,
-  device_type,
-  total_sessions,
-
-  user_pseudo_id IS NOT NULL AS has_user_pseudo_id,
+  p.user_pseudo_id IS NOT NULL AS has_user_pseudo_id,
 
   TRUE AS is_valid_registration
 
-FROM deduped
+FROM pickems p
+LEFT JOIN attributes a
+  ON  a.signup_date    = p.signup_date
+  AND a.user_pseudo_id = p.user_pseudo_id
+${when(incremental(), "WHERE p.signup_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)")}

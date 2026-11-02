@@ -1,25 +1,34 @@
 config {
   type: "view",
-  tags: ["registration", "staging", "personal"]
+  tags: ["registration", "staging", "personal"],
+  description: "Personal (Hotspawn site) registrations, one row per browser per day, from user_signup_schema (user_signup_event = 1). Excludes any browser + day that is a Pick'ems registration in stg_registration_pickems (decided from GA4), which fixes Pick'ems sign-ups mislabelled as personal by the form ID bug (49 in the TWC window, validated 2 Nov 2026)."
 }
 
 WITH source_rows AS (
 
   SELECT
-    signup_date,
-    user_pseudo_id,
-    signup_status,
-    signup_method,
-    signup_provider,
-    acquisition_channel,
-    acquisition_source,
-    country,
-    device_type,
-    total_sessions
+    u.signup_date,
+    u.user_pseudo_id,
+    u.signup_status,
+    u.signup_method,
+    u.signup_provider,
+    u.acquisition_channel,
+    u.acquisition_source,
+    u.country,
+    u.device_type,
+    u.total_sessions
 
-  FROM ${ref("user_signup_schema")}
+  FROM ${ref("user_signup_schema")} u
 
-  WHERE user_signup_event = 1
+  WHERE u.user_signup_event = 1
+
+    -- A browser + day that is a Pick'ems registration is not also a personal registration.
+    AND NOT EXISTS (
+      SELECT 1
+      FROM ${ref("stg_registration_pickems")} p
+      WHERE p.registration_date = u.signup_date
+        AND p.user_pseudo_id    = u.user_pseudo_id
+    )
 ),
 
 deduped AS (
