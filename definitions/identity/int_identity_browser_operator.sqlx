@@ -1,0 +1,75 @@
+config {
+  type: "view",
+  name: "int_identity_browser_operator",
+  assertions: {
+    uniqueKey: ["user_pseudo_id", "operator", "operator_user_id"],
+    nonNull: ["user_pseudo_id", "operator", "operator_user_id", "link_sources"]
+  },
+  tags: ["identity", "daily"],
+  description: "DE-01 identity, layer 3: one row per browser (GA4 user_pseudo_id) + operator user (e.g. Thunderpick), with the Hotspawn account from int_identity_browser_account. Sources: (1) affiliate_reporting.operator_conversion_events (operator_user_id + user_pseudo_id; rated accurate in the 29 Oct 2026 audit), (2) fallback afp chain: stg_thunderpick_journey_events (afp + user_pseudo_id) -> affiliate_reporting.thunderpick_postbacks_deduplicated (afp + thunderpick_user_id). Checked 3 Nov 2026: 14 postback afps in total, 10 traced to a browser; 2 TWC players linked to a Thunderpick user (volume limited by postbacks, not by the model). Built 3 Nov 2026."
+}
+
+WITH from_oce AS (
+
+  SELECT
+    user_pseudo_id,
+    LOWER(TRIM(operator)) AS operator,
+    operator_user_id,
+    MIN(event_timestamp) AS first_seen_ts,
+    MAX(IFNULL(session_has_operator_registration, 0)) AS has_operator_registration,
+    MAX(IFNULL(session_has_ftd, 0)) AS has_ftd,
+    'operator_conversion_events' AS link_source
+
+  -- not a Dataform object (built by a scheduled query), so full table name
+  FROM `hotspawn-440312.affiliate_reporting.operator_conversion_events`
+
+  WHERE user_pseudo_id IS NOT NULL
+    AND operator_user_id IS NOT NULL
+    AND TRIM(operator_user_id) != ''
+    AND operator IS NOT NULL
+
+  GROUP BY 1, 2, 3
+),
+
+from_afp AS (
+
+  SELECT DISTINCT
+    j.user_pseudo_id,
+    'thunderpick' AS operator,
+    CAST(p.thunderpick_user_id AS STRING) AS operator_user_id,
+    CAST(NULL AS TIMESTAMP) AS first_seen_ts,
+    CAST(NULL AS INT64) AS has_operator_registration,
+    CAST(NULL AS INT64) AS has_ftd,
+    'afp_postback' AS link_source
+
+  FROM ${ref("stg_thunderpick_journey_events")} j
+  -- not a Dataform object, so full table name
+  JOIN `hotspawn-440312.affiliate_reporting.thunderpick_postbacks_deduplicated` p
+    ON p.afp = j.afp
+
+  WHERE j.user_pseudo_id IS NOT NULL
+    AND j.afp IS NOT NULL
+    AND p.thunderpick_user_id IS NOT NULL
+),
+
+combined AS (
+  SELECT * FROM from_oce
+  UNION ALL
+  SELECT * FROM from_afp
+)
+
+SELECT
+  c.user_pseudo_id,
+  i.account_id,
+  c.operator,
+  c.operator_user_id,
+  MIN(c.first_seen_ts) AS first_seen_ts,
+  MAX(c.has_operator_registration) AS has_operator_registration,
+  MAX(c.has_ftd) AS has_ftd,
+  STRING_AGG(DISTINCT c.link_source, ', ' ORDER BY c.link_source) AS link_sources
+
+FROM combined c
+LEFT JOIN ${ref("int_identity_browser_account")} i
+  ON i.user_pseudo_id = c.user_pseudo_id
+
+GROUP BY c.user_pseudo_id, i.account_id, c.operator, c.operator_user_id
