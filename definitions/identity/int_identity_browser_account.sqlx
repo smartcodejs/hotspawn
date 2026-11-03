@@ -1,0 +1,32 @@
+config {
+  type: "view",
+  name: "int_identity_browser_account",
+  assertions: {
+    uniqueKey: ["user_pseudo_id"],
+    nonNull: ["user_pseudo_id", "account_id", "account_count", "has_multiple_accounts"]
+  },
+  tags: ["identity", "daily"],
+  description: "DE-01 identity, layer 2: one row per browser (GA4 user_pseudo_id) with its account (GA4 user_id). If a browser was used by 2+ accounts (about 3.6% of browsers: shared devices, testers), account_id = the account seen most recently on that browser and has_multiple_accounts = TRUE, so reports can exclude or inspect them. Built on int_identity_pairs. Validated 3 Nov 2026: 1,638 browsers, 1,523 accounts; TWC players resolved 116 of 123 (94.3%; the 7 played only before user_id was added to play.hotspawn.com on 14 Oct and never logged in again)."
+}
+
+SELECT
+  user_pseudo_id,
+
+  -- most recently seen account on this browser; ties broken by earliest first_seen, then id
+  ARRAY_AGG(
+    account_id
+    ORDER BY last_seen_ts DESC, first_seen_ts ASC, account_id
+    LIMIT 1
+  )[OFFSET(0)] AS account_id,
+
+  COUNT(DISTINCT account_id) AS account_count,
+  COUNT(DISTINCT account_id) > 1 AS has_multiple_accounts,
+
+  MIN(first_seen_ts) AS first_linked_ts,
+  MAX(last_seen_ts) AS last_linked_ts,
+
+  LOGICAL_OR(seen_on_www) AS seen_on_www,
+  LOGICAL_OR(seen_on_play) AS seen_on_play
+
+FROM ${ref("int_identity_pairs")}
+GROUP BY user_pseudo_id
