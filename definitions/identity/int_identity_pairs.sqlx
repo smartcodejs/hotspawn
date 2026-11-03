@@ -1,0 +1,63 @@
+config {
+  type: "incremental",
+  name: "int_identity_pairs",
+  uniqueKey: ["user_pseudo_id", "account_id"],
+  bigquery: {
+    clusterBy: ["user_pseudo_id", "account_id"]
+  },
+  assertions: {
+    uniqueKey: ["user_pseudo_id", "account_id"],
+    nonNull: ["user_pseudo_id", "account_id", "first_seen_ts", "last_seen_ts"],
+    rowConditions: [
+      "first_seen_ts <= last_seen_ts"
+    ]
+  },
+  tags: ["identity", "daily"],
+  description: "DE-01 identity, layer 1: one row per browser (GA4 user_pseudo_id) + account (GA4 user_id) pair. Account key = GA4 user_id, set on login and sign-up for all Hotspawn products (www since Jul 2026, play.hotspawn.com since 14 Oct 2026). Real hosts only: www.hotspawn.com, play.hotspawn.com, hotspawn.com. Full build from 2026-07-01; daily runs read the last 4 days and keep the earliest first_seen_ts already stored. Pick'ems backend user_id is a browser ID (= user_pseudo_id), not an account, so it is not used here. Built 3 Nov 2026."
+}
+
+WITH new_pairs AS (
+
+  SELECT
+    user_pseudo_id,
+    user_id AS account_id,
+    MIN(TIMESTAMP_MICROS(event_timestamp)) AS first_seen_ts,
+    MAX(TIMESTAMP_MICROS(event_timestamp)) AS last_seen_ts,
+    LOGICAL_OR(device.web_info.hostname IN ('www.hotspawn.com', 'hotspawn.com')) AS seen_on_www,
+    LOGICAL_OR(device.web_info.hostname = 'play.hotspawn.com') AS seen_on_play
+
+  FROM `hotspawn-440312.analytics_457395054.events_*`
+
+  WHERE _TABLE_SUFFIX >= ${when(incremental(),
+          "FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY))",
+          "'20260701'")}
+    AND _TABLE_SUFFIX NOT LIKE 'intraday%'
+    AND user_id IS NOT NULL
+    AND user_pseudo_id IS NOT NULL
+    -- real sites only (same allow-list as user_signup_schema, DE-03 3 Nov 2026)
+    AND device.web_info.hostname IN ('www.hotspawn.com', 'play.hotspawn.com', 'hotspawn.com')
+
+  GROUP BY user_pseudo_id, user_id
+)
+
+${when(incremental(),
+`SELECT
+  n.user_pseudo_id,
+  n.account_id,
+  -- keep the earliest date already stored; extend the latest
+  LEAST(n.first_seen_ts, IFNULL(o.first_seen_ts, n.first_seen_ts)) AS first_seen_ts,
+  GREATEST(n.last_seen_ts, IFNULL(o.last_seen_ts, n.last_seen_ts)) AS last_seen_ts,
+  n.seen_on_www OR IFNULL(o.seen_on_www, FALSE) AS seen_on_www,
+  n.seen_on_play OR IFNULL(o.seen_on_play, FALSE) AS seen_on_play
+FROM new_pairs n
+LEFT JOIN ${self()} o
+  ON o.user_pseudo_id = n.user_pseudo_id
+ AND o.account_id = n.account_id`,
+`SELECT
+  user_pseudo_id,
+  account_id,
+  first_seen_ts,
+  last_seen_ts,
+  seen_on_www,
+  seen_on_play
+FROM new_pairs`)}
