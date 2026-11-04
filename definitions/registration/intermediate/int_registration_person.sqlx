@@ -1,0 +1,139 @@
+config {
+  type: "view",
+  name: "int_registration_person",
+  assertions: {
+    uniqueKey: ["registration_id"],
+    nonNull: ["registration_id", "registration_date", "registration_type", "account_source", "person_key"]
+  },
+  tags: ["registration", "intermediate", "daily"],
+  description: "DE-03: registration attribution, one registration per person, ever. Source: analytics_457395054.user_registration_session_funnel_schema (scheduled query, one row per sign-up EVENT; the sign-up event can fire 2-3 times per account: callback / lobby / onboarding, see DEV-R6). Rule for Pick'ems and full (regular) sign-ups: person = GA4 user_id, else the account from int_identity_browser_account (DE-01), else the browser, else the event itself; the registration is the person's FIRST sign-up event; type = 'pickems' if the person has a Pick'ems sign-up event within 24 h of the first one (the Pick'ems flow also fires a www sign-up), else the type of the first event. A person can register only once; later sign-up events are not registrations. Community and newsletter rows pass through unchanged. Validated 4 Nov 2026: 3,622 Pick'ems + full event rows -> 2,009 registrations (full 1,255, Pick'ems 754); TWC 10-18 Oct: full 336, Pick'ems 291 (268 via user_id, 4 via identity table, 19 browser-only); 50 registrations corrected from full to Pick'ems."
+}
+
+WITH funnel_events AS (
+
+  -- scheduled query output, not a Dataform object: full table name
+  SELECT *
+  FROM `hotspawn-440312.analytics_457395054.user_registration_session_funnel_schema`
+),
+
+-- ============================================================
+-- Pick'ems + full: one registration per person
+-- ============================================================
+
+person_events AS (
+
+  SELECT
+    f.*,
+    COALESCE(f.user_id, i.account_id) AS resolved_account_id,
+    CASE
+      WHEN f.user_id IS NOT NULL THEN 'user_id'
+      WHEN i.account_id IS NOT NULL THEN 'identity_table'
+      ELSE 'browser_only'
+    END AS account_source,
+    -- CHANGED 4 Nov: last fallback = the event itself, so rows without account AND browser are never merged together
+    COALESCE(
+      f.user_id,
+      i.account_id,
+      CONCAT('browser:', f.user_pseudo_id),
+      CONCAT('event:', f.registration_id)
+    ) AS person_key
+
+  FROM funnel_events f
+  LEFT JOIN ${ref("int_identity_browser_account")} i
+    ON i.user_pseudo_id = f.user_pseudo_id
+
+  WHERE f.registration_type IN ('pickems', 'full')
+),
+
+person_flagged AS (
+
+  SELECT
+    *,
+    MIN(registration_timestamp) OVER (PARTITION BY person_key) AS first_ts,
+    COUNT(*) OVER (PARTITION BY person_key) AS merged_event_rows,
+    ROW_NUMBER() OVER (
+      PARTITION BY person_key
+      ORDER BY registration_timestamp, registration_id
+    ) AS rn
+
+  FROM person_events
+),
+
+person_typed AS (
+
+  SELECT
+    *,
+    LOGICAL_OR(
+      registration_type = 'pickems'
+      AND registration_timestamp <= TIMESTAMP_ADD(first_ts, INTERVAL 24 HOUR)
+    ) OVER (PARTITION BY person_key) AS pickems_within_24h
+
+  FROM person_flagged
+),
+
+person_registrations AS (
+
+  SELECT
+    registration_id,
+    registration_date,
+    registration_timestamp,
+    IF(pickems_within_24h, 'pickems', registration_type) AS registration_type,
+    registration_type AS original_registration_type,
+    IF(pickems_within_24h, 'pickems', registration_type) != registration_type AS type_corrected,
+    user_pseudo_id,
+    user_id,
+    resolved_account_id,
+    account_source,
+    person_key,
+    merged_event_rows,
+    session_id,
+    registration_page_url,
+    session_pages,
+    session_source,
+    session_medium,
+    session_campaign,
+    funnel
+
+  FROM person_typed
+  WHERE rn = 1
+),
+
+-- ============================================================
+-- Community + newsletter: unchanged
+-- ============================================================
+
+other_registrations AS (
+
+  SELECT
+    e.registration_id,
+    e.registration_date,
+    e.registration_timestamp,
+    e.registration_type,
+    e.registration_type AS original_registration_type,
+    FALSE AS type_corrected,
+    e.user_pseudo_id,
+    e.user_id,
+    e.user_id AS resolved_account_id,
+    IF(e.user_id IS NOT NULL, 'user_id', 'none') AS account_source,
+    -- CHANGED 4 Nov: same fallback as above
+    COALESCE(
+      e.user_id,
+      CONCAT('browser:', e.user_pseudo_id),
+      CONCAT('event:', e.registration_id)
+    ) AS person_key,
+    1 AS merged_event_rows,
+    e.session_id,
+    e.registration_page_url,
+    e.session_pages,
+    e.session_source,
+    e.session_medium,
+    e.session_campaign,
+    e.funnel
+
+  FROM funnel_events e
+  WHERE e.registration_type NOT IN ('pickems', 'full')
+)
+
+SELECT * FROM person_registrations
+UNION ALL
+SELECT * FROM other_registrations
