@@ -2,7 +2,7 @@ config {
   type: "incremental",
   schema: dataform.projectConfig.vars.schema,
   name: "int_session_view",
-  description: "One row per GA4 session (user_pseudo_id + ga_session_id) for Hotspawn. Same columns as analytics_457395054.session_view_level_schema_volume_3. Engagement, bounces, key events, excluded traffic and session date come from includes/metric_definitions.js; channel grouping from includes/channel_grouping.js. Sessions are no longer split at midnight: date = date of the session's first event.",
+  description: "One row per GA4 session (user_pseudo_id + ga_session_id) for Hotspawn. Same columns as analytics_457395054.session_view_level_schema_volume_3. Engagement, bounces, key events, excluded traffic and session date come from includes/metric_definitions.js; channel grouping from includes/channel_grouping.js. Sessions are no longer split at midnight: date = date of the session's first event. Events whose ga_session_id (session start) is more than 1 day older than the event itself are dropped (replayed / stale-cookie sessions), so a session_id can never reappear outside the 7-day MERGE window.",
 
   uniqueKey: ["session_id"],
 
@@ -70,6 +70,9 @@ events_clean AS (
   WHERE user_pseudo_id IS NOT NULL
     AND ga_session_id IS NOT NULL
     AND NOT ${metric_definitions.isExcludedUrl("page_location")}
+    -- Drop replayed / stale-cookie sessions: ga_session_id is the session start (epoch seconds),
+    -- event_timestamp is epoch microseconds. A real session never starts > 1 day before its events.
+    AND ga_session_id >= DIV(event_timestamp, 1000000) - 86400
 ),
 
 sessions AS (
